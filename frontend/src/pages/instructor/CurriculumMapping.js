@@ -36,52 +36,16 @@ import {
     Tooltip,
     Typography
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 
 // Mock data for curriculum mapping
 const mockCourse = {
   id: '1',
-  title: 'Data Structures and Algorithms',
+  title: 'Python Programming',
   code: 'CS301',
-  description: 'Introduction to fundamental data structures and algorithms used in computer science.',
-  learningOutcomes: [
-    {
-      id: '1',
-      text: 'Understand fundamental data structures and their implementations',
-      bloom: 'Understand',
-      competency: 'Core',
-      assessments: ['1', '3']
-    },
-    {
-      id: '2',
-      text: 'Analyze algorithm complexity using Big O notation',
-      bloom: 'Analyze',
-      competency: 'Core',
-      assessments: ['1']
-    },
-    {
-      id: '3',
-      text: 'Implement and use common data structures such as lists, stacks, queues, trees, and graphs',
-      bloom: 'Apply',
-      competency: 'Advanced',
-      assessments: ['2', '3']
-    },
-    {
-      id: '4',
-      text: 'Apply appropriate data structures to solve programming problems',
-      bloom: 'Apply',
-      competency: 'Advanced',
-      assessments: ['2', '3']
-    },
-    {
-      id: '5',
-      text: 'Compare and evaluate algorithms for efficiency',
-      bloom: 'Evaluate',
-      competency: 'Advanced',
-      assessments: ['3']
-    }
-  ],
+  description: 'Unit 1: Introduction to Python Programming Unit 2: Variables, Data Types, and Operators Unit 3: Control Flow and Looping Statements Unit 4: Functions and Modular Programming Unit 5: Data Structures and String Manipulation',
+  learningOutcomes: [],
   assessments: [
     {
       id: '1',
@@ -111,27 +75,26 @@ const mockCourse = {
   topics: [
     'Arrays', 'Linked Lists', 'Stacks', 'Queues', 'Trees', 'Graphs', 'Hashing', 
     'Algorithm Analysis', 'Recursion', 'Sorting Algorithms', 'Search Algorithms'
-  ],
-  programOutcomes: [
+  ],  programOutcomes: [
     {
       id: '1',
       text: 'Apply knowledge of computing and mathematics appropriate to the program\'s student outcomes and to the discipline',
-      mappedOutcomes: ['1', '2']
+      mappedOutcomes: []
     },
     {
       id: '2',
       text: 'Analyze a problem, and identify and define the computing requirements appropriate to its solution',
-      mappedOutcomes: ['2', '4', '5']
+      mappedOutcomes: []
     },
     {
       id: '3',
       text: 'Design, implement, and evaluate a computer-based system, process, component, or program to meet desired needs',
-      mappedOutcomes: ['3', '4']
+      mappedOutcomes: []
     },
     {
       id: '4',
       text: 'Use current techniques, skills, and tools necessary for computing practice',
-      mappedOutcomes: ['3', '4']
+      mappedOutcomes: []
     }
   ]
 };
@@ -155,6 +118,7 @@ const competencyLevels = [
 
 const CurriculumMapping = () => {
   const { courseId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [course, setCourse] = useState(null);
@@ -162,18 +126,27 @@ const CurriculumMapping = () => {
   const [openDialog, setOpenDialog] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState(0);
-  const [hoveredCell, setHoveredCell] = useState(null);
+  const [hoveredCell, setHoveredCell] = useState(null);  const [courseDescription, setCourseDescription] = useState('');
+  const [geminiError, setGeminiError] = useState(null);
   
   // Load course data
   useEffect(() => {
     setLoading(true);
+    
+    // Get course description from location state if available
+    if (location.state && location.state.courseDescription) {
+      setCourseDescription(location.state.courseDescription);
+    } else {
+      // Use the mock course description as a fallback
+      setCourseDescription(mockCourse.description);
+    }
     
     // In a real app, this would fetch data from an API
     setTimeout(() => {
       setCourse(mockCourse);
       setLoading(false);
     }, 1000);
-  }, [courseId]);
+  }, [courseId, location.state]);
   
   // Handle tab change
   const handleTabChange = (event, newValue) => {
@@ -202,43 +175,61 @@ const CurriculumMapping = () => {
       ...prevCourse,
       learningOutcomes: prevCourse.learningOutcomes.map(outcome => 
         outcome.id === editingOutcome.id ? editingOutcome : outcome
-      )
-    }));
+      )    }));
     
     handleCloseDialog();
   };
   
   // Handle generating outcomes with AI
-  const handleGenerateOutcomes = () => {
+  const handleGenerateOutcomes = async () => {
     setGenerating(true);
+    setGeminiError(null);
     
-    // In a real app, this would call an API to generate outcomes
-    setTimeout(() => {
-      // Simulate receiving AI-generated outcomes
-      const aiGeneratedOutcomes = [
-        {
-          id: '6',
-          text: 'Design and implement efficient algorithms for common computational problems',
-          bloom: 'Create',
-          competency: 'Advanced',
-          assessments: []
+    try {
+      // Use a fixed, explicit course title to prevent placeholder issues
+      const courseTitle = "Python Programming";
+      
+      // Call the backend API to generate outcomes using Gemini
+      const response = await fetch('/api/curriculum/generate-outcomes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        {
-          id: '7',
-          text: 'Evaluate the trade-offs between different data structures for specific applications',
-          bloom: 'Evaluate',
-          competency: 'Advanced',
+        body: JSON.stringify({ 
+          courseDescription, 
+          courseTitle: courseTitle
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+        if (data.outcomes && data.outcomes.length > 0) {
+        // Generate new IDs for the outcomes
+        const newOutcomes = data.outcomes.map((outcome, index) => ({
+          id: `generated-${Date.now()}-${index}`,
+          text: outcome.text,
+          bloom: outcome.bloom || 'Understand',
+          competency: outcome.competency || 'Core',
           assessments: []
-        }
-      ];
-      
-      setCourse(prevCourse => ({
-        ...prevCourse,
-        learningOutcomes: [...prevCourse.learningOutcomes, ...aiGeneratedOutcomes]
-      }));
-      
+        }));
+        
+        // Completely replace the learning outcomes instead of appending
+        setCourse(prevCourse => ({
+          ...prevCourse,
+          learningOutcomes: newOutcomes
+        }));
+      } else {
+        throw new Error('No outcomes were generated');
+      }
+    } catch (error) {
+      console.error('Error generating outcomes:', error);
+      setGeminiError(error.message || 'Failed to generate outcomes with Gemini');
+    } finally {
       setGenerating(false);
-    }, 3000);
+    }
   };
   
   // Helper to get color for Bloom's level
@@ -333,8 +324,7 @@ const CurriculumMapping = () => {
         >
           Back to Course
         </Button>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h4" component="h1">
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>          <Typography variant="h4" component="h1">
             Curriculum Mapping
           </Typography>
           <Button
@@ -347,8 +337,20 @@ const CurriculumMapping = () => {
           </Button>
         </Box>
         <Typography variant="subtitle1" color="text.secondary" gutterBottom>
-          {course.title} ({course.code})
+          Python Programming ({course.code})
         </Typography>
+        
+        {courseDescription && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            <strong>Course Description:</strong> {courseDescription}
+          </Typography>
+        )}
+        
+        {geminiError && (
+          <Alert severity="error" sx={{ mt: 2 }}>
+            {geminiError}
+          </Alert>
+        )}
       </Box>
       
       <Paper elevation={3} sx={{ p: 3, mb: 4, borderRadius: 2 }}>
@@ -364,8 +366,7 @@ const CurriculumMapping = () => {
             </Tooltip>
           </Box>
         </Box>
-        
-        <TableContainer>
+          <TableContainer>
           <Table sx={{ minWidth: 650 }} size="small">
             <TableHead>
               <TableRow>
@@ -376,35 +377,46 @@ const CurriculumMapping = () => {
               </TableRow>
             </TableHead>
             <TableBody>
-              {course.learningOutcomes.map((outcome) => (
-                <TableRow key={outcome.id} hover>
-                  <TableCell>{outcome.text}</TableCell>
-                  <TableCell>
-                    <Chip 
-                      label={outcome.bloom} 
-                      size="small" 
-                      sx={{ bgcolor: getBloomColor(outcome.bloom) }}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Chip 
-                      label={outcome.competency} 
-                      size="small" 
-                      sx={{ bgcolor: getCompetencyColor(outcome.competency) }}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Tooltip title="Edit Outcome">
-                      <IconButton 
+              {course.learningOutcomes.length > 0 ? (
+                course.learningOutcomes.map((outcome) => (
+                  <TableRow key={outcome.id} hover>
+                    <TableCell>{outcome.text}</TableCell>
+                    <TableCell>
+                      <Chip 
+                        label={outcome.bloom} 
                         size="small" 
-                        onClick={() => handleOpenEditDialog(outcome)}
-                      >
-                        <EditIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              ))}
+                        sx={{ bgcolor: getBloomColor(outcome.bloom) }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Chip 
+                        label={outcome.competency} 
+                        size="small" 
+                        sx={{ bgcolor: getCompetencyColor(outcome.competency) }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Tooltip title="Edit Outcome">
+                        <IconButton 
+                          size="small" 
+                          onClick={() => handleOpenEditDialog(outcome)}
+                        >
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={4} align="center">
+                    <Box sx={{ py: 3 }}>
+                      <Typography variant="body1" color="text.secondary">
+                        No learning outcomes yet. Click the "Generate Outcomes with AI" button to create outcomes based on the course description.
+                      </Typography>
+                    </Box>
+                  </TableCell>                </TableRow>
+              )}
             </TableBody>
           </Table>
         </TableContainer>
@@ -437,8 +449,7 @@ const CurriculumMapping = () => {
               </IconButton>
             </Tooltip>
           </Box>
-          
-          <TableContainer>
+            <TableContainer>
             <Table size="small">
               <TableHead>
                 <TableRow>
@@ -455,35 +466,47 @@ const CurriculumMapping = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {course.learningOutcomes.map((outcome) => (
-                  <TableRow key={outcome.id} hover>
-                    <TableCell>{outcome.text}</TableCell>
-                    {course.assessments.map((assessment) => (
-                      <TableCell 
-                        key={assessment.id} 
-                        align="center" 
-                        onClick={() => toggleAssessmentMapping(outcome.id, assessment.id)}
-                        onMouseEnter={() => setHoveredCell(`${outcome.id}-${assessment.id}`)}
-                        onMouseLeave={() => setHoveredCell(null)}
-                        sx={{ 
-                          cursor: 'pointer',
-                          bgcolor: isOutcomeMappedToAssessment(outcome, assessment.id) 
-                            ? '#c8e6c9' 
-                            : hoveredCell === `${outcome.id}-${assessment.id}` ? '#f0f0f0' : 'inherit',
-                          '&:hover': {
+                {course.learningOutcomes.length > 0 ? (
+                  course.learningOutcomes.map((outcome) => (
+                    <TableRow key={outcome.id} hover>
+                      <TableCell>{outcome.text}</TableCell>
+                      {course.assessments.map((assessment) => (
+                        <TableCell 
+                          key={assessment.id} 
+                          align="center" 
+                          onClick={() => toggleAssessmentMapping(outcome.id, assessment.id)}
+                          onMouseEnter={() => setHoveredCell(`${outcome.id}-${assessment.id}`)}
+                          onMouseLeave={() => setHoveredCell(null)}
+                          sx={{ 
+                            cursor: 'pointer',
                             bgcolor: isOutcomeMappedToAssessment(outcome, assessment.id) 
-                              ? '#a5d6a7' 
-                              : '#e0e0e0'
-                          }
-                        }}
-                      >
-                        {isOutcomeMappedToAssessment(outcome, assessment.id) && (
-                          <CheckCircleIcon color="success" fontSize="small" />
-                        )}
-                      </TableCell>
-                    ))}
+                              ? '#c8e6c9' 
+                              : hoveredCell === `${outcome.id}-${assessment.id}` ? '#f0f0f0' : 'inherit',
+                            '&:hover': {
+                              bgcolor: isOutcomeMappedToAssessment(outcome, assessment.id) 
+                                ? '#a5d6a7' 
+                                : '#e0e0e0'
+                            }
+                          }}
+                        >
+                          {isOutcomeMappedToAssessment(outcome, assessment.id) && (
+                            <CheckCircleIcon color="success" fontSize="small" />
+                          )}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell colSpan={course.assessments.length + 1} align="center">
+                      <Box sx={{ py: 3 }}>
+                        <Typography variant="body1" color="text.secondary">
+                          No learning outcomes available for assessment mapping. Generate learning outcomes first.
+                        </Typography>
+                      </Box>
+                    </TableCell>
                   </TableRow>
-                ))}
+                )}
               </TableBody>
             </Table>
           </TableContainer>
@@ -509,56 +532,71 @@ const CurriculumMapping = () => {
               </IconButton>
             </Tooltip>
           </Box>
-          
-          <TableContainer>
+            <TableContainer>
             <Table size="small">
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ fontWeight: 'bold', width: '40%' }}>Program Outcome</TableCell>
-                  {course.learningOutcomes.map((outcome, index) => (
-                    <TableCell 
-                      key={outcome.id} 
-                      align="center" 
-                      sx={{ fontWeight: 'bold' }}
-                    >
-                      CLO {index + 1}
-                    </TableCell>
-                  ))}
+                  {course.learningOutcomes.length > 0 ? (
+                    course.learningOutcomes.map((outcome, index) => (
+                      <TableCell 
+                        key={outcome.id} 
+                        align="center" 
+                        sx={{ fontWeight: 'bold' }}
+                      >
+                        CLO {index + 1}
+                      </TableCell>
+                    ))
+                  ) : (
+                    <TableCell align="center" sx={{ fontWeight: 'bold' }}>No CLOs Available</TableCell>
+                  )}
                 </TableRow>
               </TableHead>
               <TableBody>
-                {course.programOutcomes.map((programOutcome) => (
-                  <TableRow key={programOutcome.id} hover>
-                    <TableCell>{programOutcome.text}</TableCell>
-                    {course.learningOutcomes.map((learningOutcome) => {
-                      const isMapped = programOutcome.mappedOutcomes.includes(learningOutcome.id);
-                      const cellId = `${programOutcome.id}-${learningOutcome.id}`;
-                      
-                      return (
-                        <TableCell 
-                          key={learningOutcome.id} 
-                          align="center" 
-                          onClick={() => toggleProgramOutcomeMapping(programOutcome.id, learningOutcome.id)}
-                          onMouseEnter={() => setHoveredCell(cellId)}
-                          onMouseLeave={() => setHoveredCell(null)}
-                          sx={{ 
-                            cursor: 'pointer',
-                            bgcolor: isMapped 
-                              ? '#bbdefb' 
-                              : hoveredCell === cellId ? '#f0f0f0' : 'inherit',
-                            '&:hover': {
-                              bgcolor: isMapped ? '#90caf9' : '#e0e0e0'
-                            }
-                          }}
-                        >
-                          {isMapped && (
-                            <CheckCircleIcon color="primary" fontSize="small" />
-                          )}
-                        </TableCell>
-                      );
-                    })}
+                {course.learningOutcomes.length > 0 ? (
+                  course.programOutcomes.map((programOutcome) => (
+                    <TableRow key={programOutcome.id} hover>
+                      <TableCell>{programOutcome.text}</TableCell>
+                      {course.learningOutcomes.map((learningOutcome) => {
+                        const isMapped = programOutcome.mappedOutcomes.includes(learningOutcome.id);
+                        const cellId = `${programOutcome.id}-${learningOutcome.id}`;
+                        
+                        return (
+                          <TableCell 
+                            key={learningOutcome.id} 
+                            align="center" 
+                            onClick={() => toggleProgramOutcomeMapping(programOutcome.id, learningOutcome.id)}
+                            onMouseEnter={() => setHoveredCell(cellId)}
+                            onMouseLeave={() => setHoveredCell(null)}
+                            sx={{ 
+                              cursor: 'pointer',
+                              bgcolor: isMapped 
+                                ? '#bbdefb' 
+                                : hoveredCell === cellId ? '#f0f0f0' : 'inherit',
+                              '&:hover': {
+                                bgcolor: isMapped ? '#90caf9' : '#e0e0e0'
+                              }
+                            }}
+                          >
+                            {isMapped && (
+                              <CheckCircleIcon color="primary" fontSize="small" />
+                            )}
+                          </TableCell>
+                        );
+                      })}
+                    </TableRow>
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell colSpan={2} align="center">
+                      <Box sx={{ py: 3 }}>
+                        <Typography variant="body1" color="text.secondary">
+                          No learning outcomes available for program outcome mapping. Generate learning outcomes first.
+                        </Typography>
+                      </Box>
+                    </TableCell>
                   </TableRow>
-                ))}
+                )}
               </TableBody>
             </Table>
           </TableContainer>
@@ -570,42 +608,42 @@ const CurriculumMapping = () => {
           </Box>
         </Paper>
       </Box>
-      
-      {/* Coverage Analysis Tab */}
+        {/* Coverage Analysis Tab */}
       <Box hidden={activeTab !== 2}>
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={6}>
-            <Paper elevation={3} sx={{ p: 3, borderRadius: 2, height: '100%' }}>
-              <Typography variant="h6" gutterBottom>
-                Bloom's Taxonomy Distribution
-              </Typography>
-              
-              <Box sx={{ mt: 2 }}>
-                {bloomLevels.map(level => {
-                  const outcomesCount = course.learningOutcomes.filter(o => o.bloom === level.value).length;
-                  const percentage = (outcomesCount / course.learningOutcomes.length) * 100;
-                  
-                  return (
-                    <Box key={level.value} sx={{ mb: 1 }}>
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
-                        <Typography variant="body2">{level.value}</Typography>
-                        <Typography variant="body2">{outcomesCount} ({percentage.toFixed(0)}%)</Typography>
+        {course.learningOutcomes.length > 0 ? (
+          <Grid container spacing={3}>
+            <Grid item xs={12} md={6}>
+              <Paper elevation={3} sx={{ p: 3, borderRadius: 2, height: '100%' }}>
+                <Typography variant="h6" gutterBottom>
+                  Bloom's Taxonomy Distribution
+                </Typography>
+                
+                <Box sx={{ mt: 2 }}>
+                  {bloomLevels.map(level => {
+                    const outcomesCount = course.learningOutcomes.filter(o => o.bloom === level.value).length;
+                    const percentage = (outcomesCount / course.learningOutcomes.length) * 100;
+                    
+                    return (
+                      <Box key={level.value} sx={{ mb: 1 }}>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                          <Typography variant="body2">{level.value}</Typography>
+                          <Typography variant="body2">{outcomesCount} ({percentage.toFixed(0)}%)</Typography>
+                        </Box>
+                        <Box 
+                          sx={{ 
+                            height: 20, 
+                            bgcolor: level.color,
+                            width: `${percentage}%`,
+                            minWidth: '10px',
+                            borderRadius: 1
+                          }} 
+                        />
                       </Box>
-                      <Box 
-                        sx={{ 
-                          height: 20, 
-                          bgcolor: level.color,
-                          width: `${percentage}%`,
-                          minWidth: '10px',
-                          borderRadius: 1
-                        }} 
-                      />
-                    </Box>
-                  );
-                })}
-              </Box>
-            </Paper>
-          </Grid>
+                    );
+                  })}
+                </Box>
+              </Paper>
+            </Grid>
           
           <Grid item xs={12} md={6}>
             <Paper elevation={3} sx={{ p: 3, borderRadius: 2, height: '100%' }}>
@@ -697,9 +735,26 @@ const CurriculumMapping = () => {
                   </ListItem>
                 )}
               </List>
-            </Paper>
-          </Grid>
+            </Paper>          </Grid>
         </Grid>
+        ) : (
+          <Paper elevation={3} sx={{ p: 5, borderRadius: 2, textAlign: 'center' }}>
+            <Typography variant="h6" gutterBottom color="text.secondary">
+              Coverage Analysis Not Available
+            </Typography>
+            <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+              No learning outcomes available for analysis. Generate learning outcomes first to view coverage analytics.
+            </Typography>
+            <Button
+              variant="contained"
+              startIcon={<AutoAwesomeIcon />}
+              onClick={handleGenerateOutcomes}
+              disabled={generating}
+            >
+              {generating ? 'Generating...' : 'Generate Outcomes with AI'}
+            </Button>
+          </Paper>
+        )}
       </Box>
       
       {/* Edit Outcome Dialog */}

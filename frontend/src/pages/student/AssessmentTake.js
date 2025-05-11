@@ -213,16 +213,44 @@ const AssessmentTake = () => {
     setConfirmSubmit(false);
   };
   
-  // Handle assessment submission
+  // Handle assessment submission with AI evaluation
   const handleSubmitAssessment = async () => {
     setSubmitting(true);
     
-    // In a real app, you would submit the assessment to your API
     try {
-      // Simulate API call
+      // Prepare submission data
+      const submissionData = {
+        assessmentId: assessment.id,
+        answers: answers,
+        timeSpent: assessment.timeLimit * 60 - timeRemaining,
+        completedAt: new Date().toISOString()
+      };
+      
+      console.log('Submitting assessment:', submissionData);
+      
+      // In a real app, this would be an API call to submit the assessment
+      // const response = await fetch('/api/assessment/submit-with-ai-eval', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'Authorization': `Bearer ${currentUser.token}`
+      //   },
+      //   body: JSON.stringify(submissionData)
+      // });
+      // 
+      // const result = await response.json();
+      
+      // For demo, we'll simulate the API response
       await new Promise(resolve => setTimeout(resolve, 1500));
       
-      // Calculate score (this would be done on the server in a real app)
+      const result = {
+        success: true,
+        submissionId: 'sub-' + Date.now(),
+        evaluationStatus: 'started',
+        message: 'Submission received. AI evaluation in progress.'
+      };
+      
+      // Calculate an estimated score (this would be done on the server in a real app)
       let score = 0;
       let maxScore = 0;
       
@@ -250,18 +278,25 @@ const AssessmentTake = () => {
         }
       });
       
-      // Navigate to results page
-      navigate(`/results/${assessmentId}`, { 
+      // Close confirmation dialog
+      setConfirmSubmit(false);
+      
+      // Navigate to results page with AI evaluation status
+      navigate(`/results/${assessment.id}`, { 
         state: { 
+          submissionId: result.submissionId,
+          evaluationStatus: result.evaluationStatus,
           score,
           maxScore,
           answers,
-          assessment
+          assessment,
+          message: result.message
         }
       });
     } catch (error) {
       setError('Failed to submit assessment. Please try again.');
       setSubmitting(false);
+      setConfirmSubmit(false);
     }
   };
   

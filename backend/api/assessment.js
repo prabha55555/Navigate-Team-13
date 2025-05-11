@@ -559,6 +559,124 @@ router.post('/submit', authMiddleware, async (req, res) => {
   }
 });
 
+// @route   POST /api/assessment/submit-with-ai-eval
+// @desc    Submit assessment and initiate AI evaluation
+// @access  Private (Student only)
+router.post('/submit-with-ai-eval', authMiddleware, async (req, res) => {
+  try {
+    const { 
+      assessmentId, 
+      answers, 
+      timeSpent 
+    } = req.body;
+    
+    if (!assessmentId || !answers || typeof answers !== 'object') {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required submission information'
+      });
+    }
+    
+    // In a real implementation, you would:
+    // 1. Validate the assessmentId exists and is available to the student
+    // 2. Save the submission to the database
+    
+    // Get assessment settings
+    const assessment = await Assessment.findById(assessmentId);
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assessment not found'
+      });
+    }
+    
+    // Create submission document
+    const submission = new Submission({
+      assessmentId,
+      studentId: req.user.id,
+      answers,
+      timeSpent,
+      submittedAt: new Date(),
+      aiEvaluation: {
+        status: 'pending'
+      }
+    });
+    
+    // Save submission
+    const savedSubmission = await submission.save();
+    
+    // Start AI evaluation process
+    // This would be handled by a queue in a production environment
+    if (assessment.aiEvaluationSettings && assessment.aiEvaluationSettings.enablePlagiarismDetection) {
+      // Start plagiarism detection asynchronously
+      startPlagiarismDetection(savedSubmission, assessment);
+    }
+    
+    if (assessment.aiEvaluationSettings && assessment.aiEvaluationSettings.enableLLMEvaluation) {
+      // Start LLM evaluation asynchronously
+      startLLMEvaluation(savedSubmission, assessment);
+    }
+    
+    if (assessment.aiEvaluationSettings && assessment.aiEvaluationSettings.enableExpertPanelFeedback) {
+      // Start expert panel feedback asynchronously
+      startExpertPanelFeedback(savedSubmission, assessment);
+    }
+    
+    // Return success response
+    res.status(200).json({
+      success: true,
+      message: 'Assessment submitted successfully. AI evaluation in progress.',
+      submissionId: savedSubmission._id,
+      evaluationStatus: 'started'
+    });
+  } catch (error) {
+    console.error('Error submitting assessment with AI evaluation:', error);
+    res.status(500).json({
+      success: false,
+      message: `Error submitting assessment: ${error.message}`
+    });
+  }
+});
+
+// @route   GET /api/assessment/evaluation-status/:submissionId
+// @desc    Check status of AI evaluation
+// @access  Private (Student/Instructor)
+router.get('/evaluation-status/:submissionId', authMiddleware, async (req, res) => {
+  try {
+    const { submissionId } = req.params;
+    
+    // Get submission
+    const submission = await Submission.findById(submissionId);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+    
+    // Check authorization (student owns submission or instructor owns course)
+    if (submission.studentId.toString() !== req.user.id && req.user.role !== 'instructor') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view this submission'
+      });
+    }
+    
+    // Return evaluation status
+    res.status(200).json({
+      success: true,
+      evaluationStatus: submission.aiEvaluation.status,
+      submission: submission
+    });
+  } catch (error) {
+    console.error('Error checking evaluation status:', error);
+    res.status(500).json({
+      success: false,
+      message: `Error checking evaluation status: ${error.message}`
+    });
+  }
+});
+
 // @route   GET /api/assessment/results/:submissionId
 // @desc    Get assessment submission results
 // @access  Private (Owner student or instructor)
@@ -685,5 +803,324 @@ router.get('/course/:courseId/submissions', authMiddleware, async (req, res) => 
     });
   }
 });
+
+/**
+ * Helper function to start plagiarism detection
+ * @param {Object} submission - The submission document
+ * @param {Object} assessment - The assessment document
+ */
+async function startPlagiarismDetection(submission, assessment) {
+  try {
+    // Get answers as a single text for analysis
+    const answersText = Object.entries(submission.answers)
+      .map(([questionId, answer]) => {
+        const question = assessment.questions.find(q => q._id.toString() === questionId);
+        if (!question) return '';
+        
+        if (typeof answer === 'string') {
+          return answer;
+        } else if (Array.isArray(answer)) {
+          return answer.join('. ');
+        } else if (typeof answer === 'boolean') {
+          return answer ? 'True' : 'False';
+        }
+        return '';
+      })
+      .filter(text => text.length > 0)
+      .join('\n\n');
+    
+    // Skip if no text to analyze
+    if (answersText.length < 50) {
+      submission.aiEvaluation.status = 'plagiarism-complete';
+      submission.aiEvaluation.plagiarismResults = {
+        score: 0,
+        source: assessment.aiEvaluationSettings.plagiarismService,
+        details: {
+          message: 'Insufficient text for analysis'
+        },
+        isPlagiarized: false,
+        timestamp: new Date()
+      };
+      await submission.save();
+      return;
+    }
+    
+    // Initialize plagiarism detection service
+    const PlagiarismDetectionService = require('../services/PlagiarismDetectionService');
+    const plagiarismService = new PlagiarismDetectionService();
+    
+    // Select service based on assessment settings
+    let results;
+    const service = assessment.aiEvaluationSettings.plagiarismService;
+    
+    switch (service) {
+      case 'turnitin':
+        results = await plagiarismService.detectWithTurnitin(answersText, {
+          studentId: submission.studentId,
+          courseId: assessment.courseId
+        });
+        break;
+      case 'gptzero':
+        results = await plagiarismService.detectWithGPTZero(answersText);
+        break;
+      case 'aws-comprehend':
+        results = await plagiarismService.detectWithAWSComprehend(answersText);
+        break;
+      default:
+        // Default to mock implementation for demo
+        results = await plagiarismService.detectPlagiarismMock(answersText);
+    }
+    
+    // Update submission with results
+    submission.aiEvaluation.plagiarismResults = results;
+    submission.aiEvaluation.status = 'plagiarism-complete';
+    await submission.save();
+    
+    // If LLM evaluation is not enabled, mark as fully complete
+    if (!assessment.aiEvaluationSettings.enableLLMEvaluation && 
+        !assessment.aiEvaluationSettings.enableExpertPanelFeedback) {
+      submission.aiEvaluation.status = 'fully-complete';
+      await submission.save();
+    }
+  } catch (error) {
+    console.error('Plagiarism detection error:', error);
+    // Update submission with error status
+    submission.aiEvaluation.plagiarismResults = {
+      error: error.message,
+      timestamp: new Date()
+    };
+    await submission.save();
+  }
+}
+
+/**
+ * Helper function to start LLM evaluation
+ * @param {Object} submission - The submission document
+ * @param {Object} assessment - The assessment document
+ */
+async function startLLMEvaluation(submission, assessment) {
+  try {
+    // Initialize LLM evaluation service
+    const LLMEvaluationService = require('../services/LLMEvaluationService');
+    const llmService = new LLMEvaluationService();
+    
+    // Process each answer separately
+    const evaluationResults = {
+      exactMatchScore: 0,
+      semanticSimilarityScore: 0,
+      reasoningCheckScore: 0,
+      overallScore: 0,
+      timestamp: new Date(),
+      details: {
+        exactMatch: { matchedPhrases: [] },
+        semanticSimilarity: {},
+        reasoning: { strengths: [], weaknesses: [], improvement: [] }
+      }
+    };
+    
+    // Get all questions and their model answers
+    let totalPoints = 0;
+    let scoredPoints = 0;
+    
+    for (const [questionId, answer] of Object.entries(submission.answers)) {
+      const question = assessment.questions.find(q => q._id.toString() === questionId);
+      if (!question) continue;
+      
+      // Skip multiple choice and true/false questions
+      if (question.type === 'multiple-choice' || question.type === 'true-false') {
+        // These are evaluated directly
+        continue;
+      }
+      
+      // Only evaluate text-based answers
+      if (typeof answer === 'string' && answer.trim().length > 0) {
+        const modelAnswer = question.correctAnswer;
+        
+        // Evaluate each component
+        const exactMatchResults = await llmService.evaluateExactMatch(answer, modelAnswer);
+        const semanticResults = await llmService.evaluateSemantic(answer, modelAnswer);
+        const reasoningResults = await llmService.evaluateReasoning(answer, question);
+        
+        // Weight the scores according to assessment settings
+        const exactWeight = assessment.aiEvaluationSettings.llmEvaluationWeights.exactMatch;
+        const semanticWeight = assessment.aiEvaluationSettings.llmEvaluationWeights.semanticSimilarity;
+        const reasoningWeight = assessment.aiEvaluationSettings.llmEvaluationWeights.reasoning;
+        
+        // Calculate weighted question score
+        const questionScore = (
+          exactMatchResults.score * exactWeight +
+          semanticResults.score * semanticWeight +
+          reasoningResults.score * reasoningWeight
+        );
+        
+        // Accumulate scores
+        scoredPoints += questionScore * question.points;
+        totalPoints += question.points;
+        
+        // Collect feedback
+        evaluationResults.details.exactMatch.matchedPhrases.push(...exactMatchResults.matchedPhrases);
+        evaluationResults.details.reasoning.strengths.push(...reasoningResults.strengths);
+        evaluationResults.details.reasoning.weaknesses.push(...reasoningResults.weaknesses);
+      }
+    }
+    
+    // Calculate overall scores
+    if (totalPoints > 0) {
+      evaluationResults.overallScore = Math.round((scoredPoints / totalPoints) * 100);
+      
+      // Simulate individual component scores for the prototype
+      evaluationResults.exactMatchScore = Math.min(100, Math.round(evaluationResults.overallScore * (0.9 + Math.random() * 0.2)));
+      evaluationResults.semanticSimilarityScore = Math.min(100, Math.round(evaluationResults.overallScore * (0.9 + Math.random() * 0.2)));
+      evaluationResults.reasoningCheckScore = Math.min(100, Math.round(evaluationResults.overallScore * (0.9 + Math.random() * 0.2)));
+    }
+    
+    // Add explanations
+    evaluationResults.details.exactMatch.explanation = generateExactMatchExplanation(evaluationResults);
+    evaluationResults.details.semanticSimilarity.explanation = generateSemanticExplanation(evaluationResults);
+    evaluationResults.details.reasoning.improvement = generateImprovementSuggestions(evaluationResults);
+    
+    // Update submission with results
+    submission.aiEvaluation.llmEvaluation = evaluationResults;
+    submission.aiEvaluation.status = 'llm-complete';
+    await submission.save();
+    
+    // If expert panel is not enabled, mark as fully complete
+    if (!assessment.aiEvaluationSettings.enableExpertPanelFeedback) {
+      submission.aiEvaluation.status = 'fully-complete';
+      await submission.save();
+    }
+  } catch (error) {
+    console.error('LLM evaluation error:', error);
+    // Update submission with error status
+    submission.aiEvaluation.llmEvaluation = {
+      error: error.message,
+      timestamp: new Date()
+    };
+    await submission.save();
+  }
+}
+
+/**
+ * Helper function to start expert panel feedback
+ * @param {Object} submission - The submission document
+ * @param {Object} assessment - The assessment document
+ */
+async function startExpertPanelFeedback(submission, assessment) {
+  try {
+    // Initialize expert panel service
+    const ExpertPanelService = require('../services/ExpertPanelService');
+    const expertService = new ExpertPanelService();
+    
+    // Get all answers and questions for comprehensive analysis
+    const studentAnswers = [];
+    const questionTexts = [];
+    const modelAnswers = [];
+    
+    for (const [questionId, answer] of Object.entries(submission.answers)) {
+      const question = assessment.questions.find(q => q._id.toString() === questionId);
+      if (!question) continue;
+      
+      studentAnswers.push(typeof answer === 'string' ? answer : JSON.stringify(answer));
+      questionTexts.push(question.text);
+      modelAnswers.push(typeof question.correctAnswer === 'string' ? question.correctAnswer : JSON.stringify(question.correctAnswer));
+    }
+    
+    // Configure expert panel feedback
+    const assessmentConfig = {
+      expertPanelFocus: {
+        misconceptions: assessment.aiEvaluationSettings.expertPanelFocus.misconceptions,
+        learningGaps: assessment.aiEvaluationSettings.expertPanelFocus.learningGaps,
+        strengthAreas: assessment.aiEvaluationSettings.expertPanelFocus.strengthAreas,
+        improvementSuggestions: assessment.aiEvaluationSettings.expertPanelFocus.improvementSuggestions
+      }
+    };
+    
+    // Use the enhanced aggregatedFeedback method for AI evaluation pipeline integration
+    const aggregatedExpertFeedback = await expertService.aggregatedFeedback(
+      studentAnswers,
+      questionTexts,
+      modelAnswers,
+      assessmentConfig
+    );
+    
+    // Update submission with comprehensive results
+    submission.aiEvaluation.expertPanelFeedback = {
+      ...aggregatedExpertFeedback,
+      timestamp: new Date()
+    };
+    
+    submission.aiEvaluation.status = 'fully-complete';
+    await submission.save();
+  } catch (error) {
+    console.error('Expert panel feedback error:', error);
+    // Update submission with error status
+    submission.aiEvaluation.expertPanelFeedback = {
+      error: error.message,
+      timestamp: new Date()
+    };
+    submission.aiEvaluation.status = 'expert-complete'; // Mark as complete even with error
+    await submission.save();
+  }
+}
+
+/**
+ * Generate explanation for exact match results
+ * @param {Object} results - Evaluation results
+ * @returns {string} - Explanation text
+ */
+function generateExactMatchExplanation(results) {
+  const score = results.exactMatchScore;
+  const phrases = results.details.exactMatch.matchedPhrases;
+  
+  if (score >= 90) {
+    return `Your answers include most of the key concepts and terms expected. You correctly mentioned ${phrases.slice(0, 3).join(', ')}, and other important terminology.`;
+  } else if (score >= 70) {
+    return `Your answers include many key concepts and terms expected. You correctly mentioned ${phrases.slice(0, 2).join(', ')}, though some important terminology is missing.`;
+  } else {
+    return `Your answers are missing several key concepts and terms expected for this assessment. Try to incorporate more specific terminology related to the subject matter.`;
+  }
+}
+
+/**
+ * Generate explanation for semantic similarity results
+ * @param {Object} results - Evaluation results
+ * @returns {string} - Explanation text
+ */
+function generateSemanticExplanation(results) {
+  const score = results.semanticSimilarityScore;
+  
+  if (score >= 90) {
+    return `Your answers show excellent semantic similarity (${score.toFixed(1)}%) to the expected concepts. You've captured the key ideas and expressed them effectively.`;
+  } else if (score >= 70) {
+    return `Your answers show good semantic similarity (${score.toFixed(1)}%) to the expected concepts. You've captured many of the important ideas, though there's room for more precision.`;
+  } else {
+    return `Your answers show limited semantic similarity (${score.toFixed(1)}%) to the expected concepts. Try to focus more on aligning your explanations with core subject concepts.`;
+  }
+}
+
+/**
+ * Generate improvement suggestions based on evaluation results
+ * @param {Object} results - Evaluation results
+ * @returns {Array<string>} - Improvement suggestions
+ */
+function generateImprovementSuggestions(results) {
+  const weaknesses = results.details.reasoning.weaknesses;
+  
+  if (weaknesses.length === 0) {
+    return ["Continue exploring more advanced topics in this area", "Practice applying these concepts to more complex scenarios"];
+  }
+  
+  const suggestions = weaknesses.map(weakness => {
+    if (weakness.includes('understanding')) {
+      return `Study the core principles of ${weakness.replace('understanding of ', '')}`;
+    } else if (weakness.includes('explanation')) {
+      return `Practice explaining ${weakness.replace('explanation of ', '')} concepts more clearly`;
+    } else {
+      return `Work on improving your knowledge of ${weakness}`;
+    }
+  });
+  
+  return suggestions;
+}
 
 module.exports = router;

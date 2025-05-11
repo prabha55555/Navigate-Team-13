@@ -7,6 +7,7 @@ import PreviewIcon from '@mui/icons-material/Preview';
 import {
     Box,
     Button,
+    Checkbox,
     Chip,
     CircularProgress,
     Container,
@@ -843,6 +844,155 @@ const AssessmentCreation = () => {
                     }
                     label="Show answers after submission"
                   />
+                </Box>
+              </Grid>
+              
+              <Grid item xs={12}>
+                <Divider sx={{ my: 2 }} />
+                <Typography variant="h6" gutterBottom>
+                  AI Evaluation Settings
+                </Typography>
+                
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Plagiarism Detection
+                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        defaultChecked
+                        onChange={(e) => {
+                          // In real implementation, update state for these settings
+                          console.log('Enable plagiarism detection:', e.target.checked);
+                        }}
+                      />
+                    }
+                    label="Enable plagiarism detection"
+                  />
+                  <FormControl fullWidth margin="normal" size="small">
+                    <InputLabel>Plagiarism Detection Service</InputLabel>
+                    <Select
+                      defaultValue="turnitin"
+                      label="Plagiarism Detection Service"
+                      onChange={(e) => {
+                        // In real implementation, update state
+                        console.log('Plagiarism service:', e.target.value);
+                      }}
+                    >
+                      <MenuItem value="turnitin">Turnitin</MenuItem>
+                      <MenuItem value="gptzero">GPTZero (AI Detection)</MenuItem>
+                      <MenuItem value="aws-comprehend">AWS Comprehend</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+                
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    LLM-based Evaluation
+                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        defaultChecked
+                        onChange={(e) => {
+                          // In real implementation, update state
+                          console.log('Enable LLM evaluation:', e.target.checked);
+                        }}
+                      />
+                    }
+                    label="Enable LLM-based evaluation"
+                  />
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 2 }}>
+                    Weight distribution for different evaluation components:
+                  </Typography>
+                  <Grid container spacing={2}>
+                    <Grid item xs={12} sm={4}>
+                      <TextField
+                        label="Exact Match Weight"
+                        type="number"
+                        defaultValue="0.3"
+                        fullWidth
+                        size="small"
+                        InputProps={{ 
+                          inputProps: { min: 0, max: 1, step: 0.1 },
+                          endAdornment: <Typography variant="caption">/ 1.0</Typography>
+                        }}
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={4}>
+                      <TextField
+                        label="Semantic Similarity Weight"
+                        type="number"
+                        defaultValue="0.4"
+                        fullWidth
+                        size="small"
+                        InputProps={{ 
+                          inputProps: { min: 0, max: 1, step: 0.1 },
+                          endAdornment: <Typography variant="caption">/ 1.0</Typography>
+                        }}
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={4}>
+                      <TextField
+                        label="Reasoning Check Weight"
+                        type="number"
+                        defaultValue="0.3"
+                        fullWidth
+                        size="small"
+                        InputProps={{ 
+                          inputProps: { min: 0, max: 1, step: 0.1 },
+                          endAdornment: <Typography variant="caption">/ 1.0</Typography>
+                        }}
+                      />
+                    </Grid>
+                  </Grid>
+                </Box>
+                
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    AI Expert Panel Feedback
+                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        defaultChecked
+                        onChange={(e) => {
+                          // In real implementation, update state
+                          console.log('Enable expert panel:', e.target.checked);
+                        }}
+                      />
+                    }
+                    label="Enable AI expert panel feedback"
+                  />
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
+                    Select feedback focus areas:
+                  </Typography>
+                  <Grid container spacing={1}>
+                    <Grid item xs={12} sm={6}>
+                      <FormControlLabel
+                        control={<Checkbox defaultChecked />}
+                        label="Identify misconceptions"
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <FormControlLabel
+                        control={<Checkbox defaultChecked />}
+                        label="Analyze learning gaps"
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <FormControlLabel
+                        control={<Checkbox defaultChecked />}
+                        label="Highlight strength areas"
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <FormControlLabel
+                        control={<Checkbox defaultChecked />}
+                        label="Provide improvement suggestions"
+                      />
+                    </Grid>
+                  </Grid>
                 </Box>
               </Grid>
               

@@ -108,6 +108,58 @@ const AssessmentSchema = new Schema({
       type: Boolean,
       default: true
     }
+  },
+  // AI-based evaluation settings
+  aiEvaluationSettings: {
+    enablePlagiarismDetection: {
+      type: Boolean,
+      default: true
+    },
+    plagiarismService: {
+      type: String,
+      enum: ['turnitin', 'gptzero', 'aws-comprehend'],
+      default: 'turnitin'
+    },
+    enableLLMEvaluation: {
+      type: Boolean,
+      default: true
+    },
+    llmEvaluationWeights: {
+      exactMatch: {
+        type: Number,
+        default: 0.3
+      },
+      semanticSimilarity: {
+        type: Number,
+        default: 0.4
+      },
+      reasoning: {
+        type: Number,
+        default: 0.3
+      }
+    },
+    enableExpertPanelFeedback: {
+      type: Boolean,
+      default: true
+    },
+    expertPanelFocus: {
+      misconceptions: {
+        type: Boolean,
+        default: true
+      },
+      learningGaps: {
+        type: Boolean,
+        default: true
+      },
+      strengthAreas: {
+        type: Boolean,
+        default: true
+      },
+      improvementSuggestions: {
+        type: Boolean,
+        default: true
+      }
+    }
   }
 });
 
@@ -161,6 +213,60 @@ const SubmissionSchema = new Schema({
   },
   gradedAt: {
     type: Date
+  },
+  // AI Evaluation Results
+  aiEvaluation: {
+    plagiarismResults: {
+      score: { type: Number }, // 0-100, higher means more likely to be plagiarized
+      source: { type: String, enum: ['turnitin', 'gptzero', 'aws-comprehend'] },
+      details: { type: Map, of: String }, // Details about matched sources
+      isPlagiarized: { type: Boolean, default: false },
+      timestamp: { type: Date }
+    },
+    llmEvaluation: {
+      exactMatchScore: { type: Number, default: 0 }, // Exact keyword matching score
+      semanticSimilarityScore: { type: Number, default: 0 }, // How close to model answer
+      reasoningCheckScore: { type: Number, default: 0 }, // Logical reasoning evaluation
+      overallScore: { type: Number, default: 0 }, // Combined AI score
+      timestamp: { type: Date }
+    },    expertPanelFeedback: {
+      misconceptions: [String],
+      learningGaps: [String],
+      strengthAreas: [String],
+      improvementSuggestions: [String],
+      detailedAnalysis: [{
+        questionIndex: Number,
+        questionText: String,
+        factualAccuracy: {
+          feedback: String,
+          suggestions: [String]
+        },
+        conceptualUnderstanding: {
+          feedback: String,
+          suggestions: [String]
+        },
+        clarity: {
+          feedback: String,
+          suggestions: [String]
+        }
+      }],
+      competencyScores: {
+        factualAccuracy: Number,
+        conceptualUnderstanding: Number,
+        clarity: Number,
+        overallCompetency: Number
+      },
+      topConcepts: [String],
+      feedbackSummary: String,
+      generatedAt: Date,
+      analysisVersion: String,
+      timestamp: { type: Date }
+    },
+    evaluationStatus: {
+      type: String,
+      enum: ['pending', 'plagiarism-complete', 'llm-complete', 'expert-complete', 'fully-complete'],
+      default: 'pending'
+    }
   }
 });
 
