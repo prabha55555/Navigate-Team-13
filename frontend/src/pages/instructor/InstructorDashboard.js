@@ -1,49 +1,45 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, Link as RouterLink } from 'react-router-dom';
-import {
-  Box,
-  Container,
-  Typography,
-  Grid,
-  Card,
-  CardContent,
-  CardActionArea,
-  Button,
-  Paper,
-  Divider,
-  List,
-  ListItem,
-  ListItemText,
-  ListItemIcon,
-  ListItemSecondaryAction,
-  IconButton,
-  Chip,
-  Avatar,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  CircularProgress,
-  Alert,
-  Tooltip
-} from '@mui/material';
-import AssessmentIcon from '@mui/icons-material/Assessment';
-import SchoolIcon from '@mui/icons-material/School';
-import PersonIcon from '@mui/icons-material/Person';
-import EventIcon from '@mui/icons-material/Event';
-import MoreVertIcon from '@mui/icons-material/MoreVert';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import TrendingDownIcon from '@mui/icons-material/TrendingDown';
-import TodayIcon from '@mui/icons-material/Today';
-import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
-import InfoIcon from '@mui/icons-material/Info';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import AssessmentIcon from '@mui/icons-material/Assessment';
+import AssignmentTurnedInIcon from '@mui/icons-material/AssignmentTurnedIn';
 import ErrorIcon from '@mui/icons-material/Error';
+import EventIcon from '@mui/icons-material/Event';
+import InfoIcon from '@mui/icons-material/Info';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import PendingIcon from '@mui/icons-material/Pending';
+import PersonIcon from '@mui/icons-material/Person';
+import SchoolIcon from '@mui/icons-material/School';
+import TrendingDownIcon from '@mui/icons-material/TrendingDown';
+import TrendingUpIcon from '@mui/icons-material/TrendingUp';
+import {
+    Alert,
+    Avatar,
+    Box,
+    Button,
+    Card,
+    CardContent,
+    Chip,
+    CircularProgress,
+    Container,
+    Divider,
+    Grid,
+    IconButton,
+    List,
+    ListItem,
+    ListItemIcon,
+    ListItemSecondaryAction,
+    ListItemText,
+    Paper,
+    Table,
+    TableBody,
+    TableCell,
+    TableContainer,
+    TableHead,
+    TableRow,
+    Tooltip,
+    Typography
+} from '@mui/material';
+import React, { useEffect, useState } from 'react';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 // Mock data for instructor dashboard
 const mockData = {
@@ -81,12 +77,11 @@ const mockData = {
       assessmentCount: 4,
       recentActivity: true
     }
-  ],
-  recentAssessments: [
+  ],  recentAssessments: [
     {
       id: '1',
-      title: 'Midterm Exam',
-      courseTitle: 'Data Structures and Algorithms',
+      title: 'Java Data Structures Assessment',
+      courseTitle: 'Data Structures and Algorithms in Java',
       courseCode: 'CS301',
       dueDate: '2025-10-15',
       submissionRate: 88,
@@ -136,12 +131,11 @@ const mockData = {
       dueDate: '2025-10-28',
       status: 'Published'
     }
-  ],
-  pendingGrading: [
+  ],  pendingGrading: [
     {
       id: '1',
-      title: 'Midterm Exam',
-      courseTitle: 'Data Structures and Algorithms',
+      title: 'Java Data Structures Assessment',
+      courseTitle: 'Data Structures and Algorithms in Java',
       courseCode: 'CS301',
       submissionCount: 5,
       totalStudents: 45
@@ -154,11 +148,10 @@ const mockData = {
       submissionCount: 12,
       totalStudents: 120
     }
-  ],
-  notifications: [
+  ],  notifications: [
     {
       id: '1',
-      message: 'New submissions awaiting grading in CS301 Midterm Exam',
+      message: 'New submissions awaiting grading in CS301 Java Data Structures Assessment',
       date: '2025-10-13',
       type: 'grading'
     },

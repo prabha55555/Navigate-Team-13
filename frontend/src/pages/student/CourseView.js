@@ -1,39 +1,39 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate, Link as RouterLink } from 'react-router-dom';
-import {
-  Box,
-  Container,
-  Typography,
-  Grid,
-  Card,
-  CardContent,
-  Button,
-  Tabs,
-  Tab,
-  Divider,
-  List,
-  ListItem,
-  ListItemIcon,
-  ListItemText,
-  Chip,
-  Paper,
-  CircularProgress
-} from '@mui/material';
-import AssignmentIcon from '@mui/icons-material/Assignment';
-import MenuBookIcon from '@mui/icons-material/MenuBook';
-import DescriptionIcon from '@mui/icons-material/Description';
-import PersonIcon from '@mui/icons-material/Person';
-import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
-import AutoGraphIcon from '@mui/icons-material/AutoGraph';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import AssignmentIcon from '@mui/icons-material/Assignment';
+import AutoGraphIcon from '@mui/icons-material/AutoGraph';
+import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import DescriptionIcon from '@mui/icons-material/Description';
+import MenuBookIcon from '@mui/icons-material/MenuBook';
+import PersonIcon from '@mui/icons-material/Person';
+import {
+    Box,
+    Button,
+    Card,
+    CardContent,
+    Chip,
+    CircularProgress,
+    Container,
+    Divider,
+    Grid,
+    List,
+    ListItem,
+    ListItemIcon,
+    ListItemText,
+    Paper,
+    Tab,
+    Tabs,
+    Typography
+} from '@mui/material';
+import React, { useEffect, useState } from 'react';
+import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom';
 
 // Mock data for development
 const mockCourse = {
   id: '1',
-  title: 'Data Structures and Algorithms',
+  title: 'Data Structures and Algorithms in Java',
   code: 'CS301',
-  description: 'Introduction to fundamental data structures and algorithms used in computer science.',
+  description: 'Introduction to fundamental data structures and algorithms implemented in Java.',
   instructor: 'Dr. Jane Smith',
   term: 'Fall 2025',
   department: 'Computer Science',
@@ -41,7 +41,7 @@ const mockCourse = {
   assessments: [
     {
       id: '1',
-      title: 'Midterm Exam',
+      title: 'Java Data Structures Assessment',
       type: 'Exam',
       dueDate: '2025-10-15',
       status: 'available',
@@ -190,13 +190,59 @@ const CourseView = () => {
   const [course, setCourse] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(0);
-
   // Load course data
   useEffect(() => {
-    // In a real application, you would fetch the course from an API
-    // For this demo, we'll use the mock data
-    setCourse(mockCourse);
-    setLoading(false);
+    const fetchCourseData = async () => {
+      setLoading(true);
+      try {
+        // In a real application, you would fetch the course from an API
+        // For this demo, we'll start with the mock data
+        let courseData = { ...mockCourse };
+        
+        // Try to get assessments from localStorage
+        try {
+          const savedAssessmentsString = localStorage.getItem('savedAssessments');
+          if (savedAssessmentsString) {
+            const savedAssessments = JSON.parse(savedAssessmentsString);
+            
+            // Filter for assessments that belong to this course and are assigned to students
+            const courseAssessments = savedAssessments
+              .filter(assessment => 
+                assessment.courseId === courseId && 
+                (assessment.assignToAllStudents || assessment.status === 'published')
+              )
+              .map(assessment => ({
+                id: assessment.id,
+                title: assessment.title,
+                type: assessment.visibility?.pattern?.name || 'Assessment',
+                dueDate: assessment.dueDate,
+                status: 'available',
+                timeLimit: assessment.timeLimit,
+                totalPoints: assessment.totalPoints,
+                visibility: assessment.visibility
+              }));
+            
+            // If we found relevant assessments, use them
+            if (courseAssessments.length > 0) {
+              courseData = {
+                ...courseData,
+                assessments: [...courseData.assessments, ...courseAssessments]
+              };
+            }
+          }
+        } catch (storageError) {
+          console.error('Error accessing localStorage:', storageError);
+        }
+        
+        setCourse(courseData);
+      } catch (error) {
+        console.error('Error fetching course data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchCourseData();
   }, [courseId]);
 
   const handleTabChange = (event, newValue) => {
@@ -328,11 +374,18 @@ const CourseView = () => {
                       label={assessment.status === 'available' ? 'Available' : 'Upcoming'} 
                       color={assessment.status === 'available' ? 'primary' : 'default'}
                       size="small"
-                    />
-                  </Box>
+                    />                  </Box>
                   <Typography variant="body2" color="text.secondary" gutterBottom>
                     {assessment.type}
+                    {assessment.visibility && assessment.visibility.pattern && 
+                      ` • ${assessment.visibility.pattern.name} • ${assessment.visibility.pattern.difficulty}`
+                    }
                   </Typography>
+                  {assessment.visibility && assessment.visibility.pattern && assessment.visibility.pattern.description && (
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                      {assessment.visibility.pattern.description}
+                    </Typography>
+                  )}
                   <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, mb: 2 }}>
                     <CalendarTodayIcon fontSize="small" sx={{ mr: 1, color: 'text.secondary' }} />
                     <Typography variant="body2" color="text.secondary">

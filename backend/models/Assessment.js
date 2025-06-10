@@ -107,7 +107,16 @@ const AssessmentSchema = new Schema({
     showResultsImmediately: {
       type: Boolean,
       default: true
+    },
+    pattern: {
+      type: Object,
+      default: null
     }
+  },
+  // Store the complete pattern information
+  pattern: {
+    type: Object,
+    default: null
   }
 });
 

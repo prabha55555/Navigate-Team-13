@@ -17,7 +17,6 @@ import {
     ListItemText,
     Toolbar,
 } from '@mui/material';
-import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -26,13 +25,19 @@ const Sidebar = ({ drawerWidth, mobileOpen, handleDrawerToggle }) => {
   const location = useLocation();
   const { currentUser } = useAuth();
   
-  const isInstructor = currentUser?.role === 'instructor' || currentUser?.role === 'admin';
+  // Get the user's role - either from the currentUser object or from localStorage as fallback
+  const userRole = currentUser?.role || localStorage.getItem('userRole');
+  console.log('Sidebar - User role:', userRole);
+  console.log('Sidebar - Current user:', currentUser);
+  
+  // Strict check for instructor role - default to student view if not explicitly an instructor/admin
+  const isInstructor = userRole === 'instructor' || userRole === 'admin' || false;
+  console.log('Sidebar - Is instructor:', isInstructor);
   
   // Navigation items for students
   const studentItems = [
     { text: 'Dashboard', icon: <DashboardIcon />, path: '/dashboard' },
     { text: 'My Courses', icon: <SchoolIcon />, path: '/dashboard' },
-    { text: 'Assessments', icon: <AssignmentIcon />, path: '/dashboard' },
     { text: 'Learning Progress', icon: <TimelineIcon />, path: '/dashboard' },
   ];
   

@@ -21,8 +21,7 @@ import {
     DialogContent,
     DialogContentText,
     DialogTitle,
-    Divider // Added missing Divider import
-    ,
+    Divider,
     FormControlLabel,
     FormGroup,
     Grid,
@@ -38,63 +37,10 @@ import {
     TextField,
     Typography
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-
-// Mock assessment data
-const mockAssessment = {
-  id: '1',
-  title: 'Midterm Exam',
-  courseId: '1',
-  courseName: 'Data Structures and Algorithms',
-  description: 'Comprehensive evaluation of your understanding of data structures',
-  dueDate: '2025-10-15T23:59:00',
-  timeLimit: 90, // in minutes
-  totalPoints: 100,
-  randomizeQuestions: true,
-  showAnswers: false,
-  questions: [
-    {
-      id: 'q1',
-      text: 'Which data structure uses LIFO (Last In First Out) principle?',
-      type: 'multiple-choice',
-      options: ['Queue', 'Stack', 'Linked List', 'Tree'],
-      correctAnswer: 'Stack',
-      points: 5
-    },
-    {
-      id: 'q2',
-      text: 'What is the time complexity of binary search?',
-      type: 'multiple-choice',
-      options: ['O(1)', 'O(log n)', 'O(n)', 'O(n log n)'],
-      correctAnswer: 'O(log n)',
-      points: 5
-    },
-    {
-      id: 'q3',
-      text: 'Explain the difference between a stack and a queue.',
-      type: 'short-answer',
-      correctAnswer: 'A stack follows LIFO (Last In First Out) principle where elements are added and removed from the same end, while a queue follows FIFO (First In First Out) principle where elements are added at one end and removed from the other end.',
-      points: 10
-    },
-    {
-      id: 'q4',
-      text: 'Which of the following are valid operations on a binary search tree? (Select all that apply)',
-      type: 'multiple-select',
-      options: ['Insertion', 'Deletion', 'In-order traversal', 'Level order traversal'],
-      correctAnswer: ['Insertion', 'Deletion', 'In-order traversal', 'Level order traversal'],
-      points: 10
-    },
-    {
-      id: 'q5',
-      text: 'True or False: A hash table provides O(1) average time complexity for insertions and lookups.',
-      type: 'true-false',
-      correctAnswer: true,
-      points: 5
-    }
-  ]
-};
 
 const AssessmentTake = () => {
   const { assessmentId } = useParams();
@@ -111,18 +57,37 @@ const AssessmentTake = () => {
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [timer, setTimer] = useState(null);
-  const [testStarted, setTestStarted] = useState(false);
-  
-  useEffect(() => {
-    // In a real app, you would fetch the assessment from an API
-    setTimeout(() => {
-      setAssessment(mockAssessment);
-      setLoading(false);
-      
-      if (mockAssessment.timeLimit) {
-        setTimeRemaining(mockAssessment.timeLimit * 60); // Convert to seconds
+  const [testStarted, setTestStarted] = useState(false);  useEffect(() => {
+    const fetchAssessment = async () => {
+      setLoading(true);
+      try {
+        // Import the assessmentTakeLoader utility
+        const AssessmentTakeLoader = (await import('../../services/assessmentTakeLoader')).default;
+        
+        console.log(`Loading assessment with ID: ${assessmentId}`);
+        
+        // Use the assessmentTakeLoader to fetch the assessment from the API
+        const success = await AssessmentTakeLoader(
+          assessmentId, 
+          setAssessment, 
+          setTimeRemaining, 
+          setError, 
+          setLoading
+        );
+        
+        if (!success) {
+          console.error('Failed to load assessment from the API');
+          setError('Could not load the assessment. Please check that the assessment exists and has been published.');
+        }
+      } catch (error) {
+        console.error('Error loading assessment:', error);
+        setError('Failed to load assessment. Please try again later.');
+      } finally {
+        setLoading(false);
       }
-    }, 1000);
+    };
+    
+    fetchAssessment();
     
     return () => {
       if (timer) {
@@ -216,47 +181,79 @@ const AssessmentTake = () => {
   // Handle assessment submission
   const handleSubmitAssessment = async () => {
     setSubmitting(true);
-    
-    // In a real app, you would submit the assessment to your API
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Get the authentication token
+      const token = localStorage.getItem('token');
+      if (!token) {
+        setError('Authentication required. Please log in.');
+        setSubmitting(false);
+        return;
+      }
+
+      // Calculate time spent
+      const timeSpent = assessment.timeLimit * 60 - timeRemaining;
       
-      // Calculate score (this would be done on the server in a real app)
-      let score = 0;
-      let maxScore = 0;
-      
-      assessment.questions.forEach(question => {
-        maxScore += question.points;
-        const userAnswer = answers[question.id];
-        
-        if (!userAnswer) return; // Unanswered
-        
-        if (question.type === 'multiple-choice' || question.type === 'true-false') {
-          if (userAnswer === question.correctAnswer) {
-            score += question.points;
-          }
-        } else if (question.type === 'multiple-select') {
-          if (userAnswer.length === question.correctAnswer.length && 
-              userAnswer.every(a => question.correctAnswer.includes(a))) {
-            score += question.points;
-          }
-        } else if (question.type === 'short-answer') {
-          // In a real app, this would be graded by AI or an instructor
-          // For now, we'll give partial credit based on answer length
-          if (userAnswer.length > 10) {
-            score += question.points * 0.8;
-          }
+      // Submit to backend API
+      const response = await axios.post('/api/student/assessment/submit', {
+        assessmentId: assessment.id || assessment._id,
+        answers,
+        timeSpent
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'x-auth-token': token
         }
       });
+
+      if (!response.data.success) {
+        throw new Error(response.data.message || 'Failed to submit assessment');
+      }      // If we have a score from the backend, use it
+      let score = response.data.score;
+      let maxScore = response.data.maxScore;
+      let submissionId = response.data.submissionId;
       
-      // Navigate to results page
-      navigate(`/results/${assessmentId}`, { 
+      // If no score provided (manual grading needed), calculate a tentative score
+      if (!score) {
+        score = 0;
+        maxScore = 0;
+        
+        assessment.questions.forEach(question => {
+          maxScore += question.points;
+          const userAnswer = answers[question.id];
+          
+          if (!userAnswer) return; // Unanswered
+        
+          if (question.type === 'multiple-choice' || question.type === 'true-false') {
+            if (userAnswer === question.correctAnswer) {
+              score += question.points;
+            }
+          } else if (question.type === 'multiple-select') {
+            if (userAnswer.length === question.correctAnswer.length && 
+                userAnswer.every(a => question.correctAnswer.includes(a))) {
+              score += question.points;
+            }
+          } else if (question.type === 'short-answer') {
+            // In a real app, this would be graded by AI or an instructor
+            // For now, we'll give partial credit based on answer length
+            if (userAnswer.length > 10) {
+              score += question.points * 0.8;
+            }
+          }
+        });
+      }      // Navigate to results page with proper submission ID and pass/fail info
+      const percentage = response.data.percentage || Math.round((score / maxScore) * 100);
+      const isPassed = response.data.isPassed !== undefined ? response.data.isPassed : percentage >= 50;
+      
+      navigate(`/results/${submissionId || 'temp'}`, { 
         state: { 
           score,
           maxScore,
+          percentage,
+          isPassed,
           answers,
-          assessment
+          assessment,
+          submissionId: submissionId || 'temp',
+          message: response.data.message
         }
       });
     } catch (error) {
@@ -361,20 +358,30 @@ const AssessmentTake = () => {
       </Box>
     );
   }
-  
-  if (!assessment) {
+    if (!assessment) {
     return (
       <Container maxWidth="md" sx={{ mt: 4 }}>
-        <Alert severity="error">
-          Assessment not found or no longer available.
-        </Alert>
-        <Button 
-          variant="contained" 
-          onClick={() => navigate('/dashboard')} 
-          sx={{ mt: 2 }}
-        >
-          Back to Dashboard
-        </Button>
+        <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
+          <Typography variant="h5" color="error" gutterBottom>
+            Assessment Not Found
+          </Typography>
+          
+          <Alert severity="error" sx={{ mb: 3 }}>
+            {error || "The assessment you're looking for is not available or may have been removed."}
+          </Alert>
+          
+          <Typography variant="body1" paragraph>
+            Please check that you have the correct assessment ID or try to access the assessment from your dashboard.
+          </Typography>
+          
+          <Button 
+            variant="contained" 
+            onClick={() => navigate('/dashboard')} 
+            sx={{ mt: 2 }}
+          >
+            Back to Dashboard
+          </Button>
+        </Paper>
       </Container>
     );
   }
@@ -382,13 +389,22 @@ const AssessmentTake = () => {
   if (!testStarted) {
     return (
       <Container maxWidth="md" sx={{ mt: 4 }}>
-        <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
-          <Typography variant="h4" gutterBottom>
+        <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>          <Typography variant="h4" gutterBottom>
             {assessment.title}
           </Typography>
           <Typography variant="subtitle1" color="text.secondary" gutterBottom>
             {assessment.courseName}
           </Typography>
+          {assessment.visibility && assessment.visibility.pattern && (
+            <>
+              <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
+                {assessment.visibility.pattern.name} • {assessment.visibility.pattern.difficulty}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {assessment.visibility.pattern.description}
+              </Typography>
+            </>
+          )}
           <Divider sx={{ my: 2 }} />
           
           <Grid container spacing={3} sx={{ mb: 3 }}>

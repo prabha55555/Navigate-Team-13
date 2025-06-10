@@ -41,6 +41,7 @@ import {
 import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import SyllabusUpload from '../../components/instructor/SyllabusUpload';
+import { saveAssessment } from '../../services/assessmentSaveService';
 
 // Mock data for patterns generated from syllabus analysis
 const mockPatterns = [
@@ -108,71 +109,71 @@ const mockPatterns = [
 const mockGeneratedQuestions = [
   {
     id: '1',
-    question: 'Which of the following data structures implements the LIFO (Last-In-First-Out) principle?',
+    question: 'Which Java collection interface is implemented by ArrayList and LinkedList?',
     questionType: 'Multiple Choice',
-    options: ['Queue', 'Stack', 'Array', 'Linked List'],
-    correctAnswer: 'Stack',
-    topic: 'Stacks and Queues',
+    options: ['Set', 'List', 'Queue', 'Map'],
+    correctAnswer: 'List',
+    topic: 'Java Collections Framework',
     difficulty: 'Easy',
     points: 2,
     bloomLevel: 'Remember'
   },
   {
     id: '2',
-    question: 'Explain the difference between a stack and a queue in terms of their operational principles and use cases.',
+    question: 'Explain the key differences between HashMap and TreeMap in Java, including time complexity for common operations.',
     questionType: 'Short Answer',
-    correctAnswer: 'A stack follows LIFO (Last-In-First-Out) where the last element added is the first one to be removed, while a queue follows FIFO (First-In-First-Out) where the first element added is the first one to be removed. Stacks are used in function calls, expression evaluation, and backtracking algorithms, while queues are used in BFS, scheduling, and buffering.',
-    topic: 'Stacks and Queues',
+    correctAnswer: 'HashMap uses a hash table for storage with O(1) average lookup, while TreeMap uses a Red-Black tree with O(log n) lookup. HashMap doesn\'t maintain any order, while TreeMap keeps keys sorted. HashMap allows null keys and values, TreeMap allows null values but not null keys. TreeMap provides methods like firstKey(), lastKey() for navigating the sorted structure, which HashMap doesn\'t support.',
+    topic: 'Java Maps',
     difficulty: 'Medium',
     points: 5,
     bloomLevel: 'Understand'
-  },
-  {
+  },  {
     id: '3',
-    question: 'Implement a function to check if a given string has balanced parentheses using a stack.',
+    question: 'Implement a Java method to check if a given string has balanced parentheses using a Stack.',
     questionType: 'Programming',
-    correctAnswer: `function isBalanced(str) {
-  const stack = [];
-  const pairs = {
-    '(': ')',
-    '{': '}',
-    '[': ']'
-  };
-  
-  for (let char of str) {
-    if (pairs[char]) {
-      stack.push(char);
-    } else if (Object.values(pairs).includes(char)) {
-      if (pairs[stack.pop()] !== char) {
-        return false;
-      }
+    correctAnswer: `public static boolean isBalanced(String str) {
+    Stack<Character> stack = new Stack<>();
+    
+    for (char c : str.toCharArray()) {
+        if (c == '(' || c == '{' || c == '[') {
+            stack.push(c);
+        } else if (c == ')' || c == '}' || c == ']') {
+            if (stack.isEmpty()) {
+                return false;
+            }
+            
+            char top = stack.pop();
+            if ((c == ')' && top != '(') || 
+                (c == '}' && top != '{') || 
+                (c == ']' && top != '[')) {
+                return false;
+            }
+        }
     }
-  }
-  
-  return stack.length === 0;
+    
+    return stack.isEmpty();
 }`,
-    topic: 'Stacks and Applications',
+    topic: 'Java Stack Implementation',
     difficulty: 'Hard',
     points: 15,
     bloomLevel: 'Apply'
   },
   {
     id: '4',
-    question: 'What is the time complexity of the worst-case scenario for finding an element in a binary search tree?',
+    question: 'What is the time complexity of the containsKey() method in a Java HashMap?',
     questionType: 'Multiple Choice',
     options: ['O(1)', 'O(log n)', 'O(n)', 'O(n²)'],
-    correctAnswer: 'O(n)',
-    topic: 'Trees and Time Complexity',
+    correctAnswer: 'O(1)',
+    topic: 'Java HashMap',
     difficulty: 'Medium',
     points: 2,
     bloomLevel: 'Apply'
-  },
-  {
+  },  {
     id: '5',
-    question: 'Compare and contrast Breadth-First Search (BFS) and Depth-First Search (DFS) algorithms for graph traversal.',
+    question: 'Discuss the implementation differences between Java\'s ArrayList and LinkedList, including when you would choose one over the other for specific use cases.',
     questionType: 'Essay',
-    correctAnswer: 'BFS explores all the neighbors at the present depth before moving to nodes at the next depth level. It uses a queue data structure and is optimal for finding the shortest path. DFS explores as far as possible along each branch before backtracking, using a stack (or recursion). BFS is better for finding shortest paths, while DFS is better for maze-like problems or when target is likely far from source. BFS requires more memory for level-by-level storage, while DFS requires less memory but may get stuck in infinite paths without proper handling.',
-    topic: 'Graph Algorithms',
+    correctAnswer: 'ArrayList in Java uses a dynamic array for storing elements while LinkedList implements the doubly-linked list data structure. ArrayList provides O(1) random access but O(n) insertion/deletion at arbitrary positions due to element shifting. LinkedList has O(n) random access as it must traverse from head/tail, but provides O(1) insertion/deletion once the position is located. ArrayList is memory-efficient for storage but requires occasional resizing, while LinkedList consumes more memory for storing node pointers but never needs resizing. ArrayList performs better for random access and iteration scenarios, while LinkedList is superior for frequent insertions and deletions at known positions, especially at the beginning or end. For large datasets with frequent random access, ArrayList is preferred, while LinkedList is better for implementations requiring frequent structural modifications like queues or priority lists.',
+    topic: 'Java Collections',
     difficulty: 'Hard',
     points: 10,
     bloomLevel: 'Analyze'
@@ -199,13 +200,13 @@ const AssessmentCreation = () => {
   const [questions, setQuestions] = useState([]);
   const [randomizeQuestions, setRandomizeQuestions] = useState(false);
   const [showAnswers, setShowAnswers] = useState(false);
+  const [assignToAllStudents, setAssignToAllStudents] = useState(false);
   const [syllabusAnalysis, setSyllabusAnalysis] = useState(null);
-  
-  // Mock course data
+    // Mock course data
   const courses = [
-    { id: '1', title: 'Data Structures and Algorithms' },
-    { id: '2', title: 'Introduction to Programming' },
-    { id: '3', title: 'Web Development Fundamentals' }
+    { id: '1', title: 'Data Structures and Algorithms in Java' },
+    { id: '2', title: 'Advanced Java Programming' },
+    { id: '3', title: 'Java Web Development' }
   ];
   
   // Load assessment data if editing existing assessment or coming from quiz generator
@@ -259,9 +260,8 @@ const AssessmentCreation = () => {
       // Simulate loading assessment data from API
       setLoading(true);
       setTimeout(() => {
-        // Mock data for an existing assessment
-        setTitle('Midterm Examination');
-        setDescription('Comprehensive evaluation of your understanding of data structures');
+        // Mock data for an existing assessment        setTitle('Java Data Structures Assessment');
+        setDescription('Comprehensive evaluation of Java collections, data structures implementation, and algorithms');
         setCourseId('1');
         setDueDate('2025-11-15T23:59');
         setTimeLimit(90);
@@ -423,10 +423,10 @@ const AssessmentCreation = () => {
   };
   
   // Save assessment
-  const handleSave = () => {
+  const handleSave = async () => {
     // Prepare assessment data
     const assessmentData = {
-      id: assessmentId || 'new',
+      id: assessmentId || `new-${Date.now()}`,
       title,
       description,
       courseId,
@@ -434,19 +434,45 @@ const AssessmentCreation = () => {
       timeLimit,
       randomizeQuestions,
       showAnswers,
+      assignToAllStudents,
       questions,
-      pattern: selectedPattern
+      pattern: selectedPattern,
+      // Add these fields for student display
+      questionCount: questions.length,
+      totalPoints: calculateTotalPoints(),
+      createdAt: new Date().toISOString(),
+      // Explicitly set status based on whether it's assigned to all students
+      status: assignToAllStudents ? 'published' : 'draft',
+      // Include visibility settings to match SyllabusUpload component
+      visibility: {
+        instructorCanSeeAnswers: true,
+        studentsCanSeeAnswers: showAnswers,
+        studentsCanSeeSyllabusTitle: true,
+        showResultsImmediately: true,
+        pattern: selectedPattern ? {
+          name: selectedPattern.name,
+          description: selectedPattern.description,
+          questionDistribution: selectedPattern.structure,
+          difficulty: selectedPattern.difficulty
+        } : null
+      }
     };
     
-    console.log('Saving assessment:', assessmentData);
-    
-    // In a real app, this would call an API to save the assessment
     setLoading(true);
-    setTimeout(() => {
+    
+    try {
+      // Use the assessment save service to save both locally and to backend
+      await saveAssessment(assessmentData);
+      alert('Assessment saved successfully!');
+      
+      // Navigate back to course management page
+      navigate(`/instructor/courses/${courseId}`);
+    } catch (error) {
+      console.error('Error saving assessment:', error);
+      alert(`Error saving assessment: ${error.message}`);
+    } finally {
       setLoading(false);
-      // Navigate back to instructor dashboard
-      navigate('/instructor/dashboard');
-    }, 2000);
+    }
   };
   
   // Calculate total points
@@ -843,6 +869,23 @@ const AssessmentCreation = () => {
                     }
                     label="Show answers after submission"
                   />
+                </Box>
+                <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+                  <Typography variant="subtitle1" gutterBottom>
+                    Availability Settings
+                  </Typography>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={assignToAllStudents}
+                        onChange={(e) => setAssignToAllStudents(e.target.checked)}
+                      />
+                    }
+                    label="Make visible to all students immediately"
+                  />
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ ml: 4 }}>
+                    When enabled, all enrolled students will see this assessment on their dashboard
+                  </Typography>
                 </Box>
               </Grid>
               

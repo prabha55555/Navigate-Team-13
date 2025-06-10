@@ -39,6 +39,8 @@ import {
     TableHead,
     TableRow,
     Tabs,
+    TextField,
+    Tooltip,
     Typography
 } from '@mui/material';
 import React, { useEffect, useState } from 'react';
@@ -60,9 +62,8 @@ const mockCourses = [
       { id: '2', name: 'Jamie Smith', email: 'jamie.s@example.com', avgScore: 92 },
       { id: '3', name: 'Taylor Williams', email: 'taylor.w@example.com', avgScore: 76 },
       // More students...
-    ],
-    assessments: [
-      { id: '1', title: 'Midterm Exam', syllabusTitle: 'Chapter 1-5', type: 'Exam', dueDate: '2025-10-15', avgScore: 82, submissions: 40, assignToAllStudents: true },
+    ],    assessments: [
+      { id: '1', title: 'Java Data Structures Assessment', syllabusTitle: 'Chapter 1-5', type: 'Exam', dueDate: '2025-10-15', avgScore: 82, submissions: 40, assignToAllStudents: true },
       { id: '2', title: 'Binary Trees Implementation', syllabusTitle: 'Chapter 6', type: 'Programming Assignment', dueDate: '2025-11-01', avgScore: 89, submissions: 42, assignToAllStudents: false },
       { id: '3', title: 'Final Exam', syllabusTitle: 'Chapter 1-10', type: 'Exam', dueDate: '2025-12-10', avgScore: 0, submissions: 0, assignToAllStudents: true }
     ],
@@ -111,6 +112,106 @@ const CourseManagement = () => {
   const [dialogAction, setDialogAction] = useState('');
   const [dialogItem, setDialogItem] = useState(null);
   const [anchorEl, setAnchorEl] = useState(null);
+  const [openCourseFormDialog, setOpenCourseFormDialog] = useState(false);
+  const [newCourseData, setNewCourseData] = useState({
+    title: '',
+    code: '',
+    department: 'Computer Science',
+    term: 'Fall 2025',
+    description: ''
+  });
+
+  // Function to handle back to courses navigation
+  const handleBackToCourses = () => {
+    setSelectedCourse(null);
+    navigate('/instructor/courses');
+  };
+
+  // Handle course form open
+  const handleCourseFormOpen = () => {
+    setOpenCourseFormDialog(true);
+  };
+
+  // Handle course form close
+  const handleCourseFormClose = () => {
+    setOpenCourseFormDialog(false);
+    // Reset form data
+    setNewCourseData({
+      title: '',
+      code: '',
+      department: 'Computer Science',
+      term: 'Fall 2025',
+      description: ''
+    });
+  };
+
+  // Handle course form change
+  const handleCourseFormChange = (e) => {
+    const { name, value } = e.target;
+    setNewCourseData({
+      ...newCourseData,
+      [name]: value
+    });
+  };
+
+  // Handle course form submit
+  const handleCourseFormSubmit = () => {
+    // Validate form data
+    if (!newCourseData.title || !newCourseData.code) {
+      alert('Please fill in all required fields.');
+      return;
+    }
+
+    // Create a new course with form data
+    const newCourse = {
+      id: `new-${Date.now()}`, // Generate a unique ID
+      title: newCourseData.title,
+      code: newCourseData.code,
+      department: newCourseData.department,
+      term: newCourseData.term,
+      enrollment: 0,
+      assessmentCount: 0,
+      description: newCourseData.description,
+      students: [],
+      assessments: [],
+      materials: []
+    };
+    
+    // Add the new course to the courses list
+    const updatedCourses = [...courses, newCourse];
+    setCourses(updatedCourses);
+    
+    // Save courses to localStorage to persist between page refreshes
+    try {
+      // Get existing saved courses
+      const savedCoursesString = localStorage.getItem('savedCourses');
+      let savedCourses = [];
+      
+      if (savedCoursesString) {
+        savedCourses = JSON.parse(savedCoursesString);
+      }
+      
+      // Add new course to saved courses
+      savedCourses.push(newCourse);
+      
+      // Save back to localStorage
+      localStorage.setItem('savedCourses', JSON.stringify(savedCourses));
+      
+      console.log('Course saved successfully:', newCourse.title);
+      alert(`Course "${newCourse.title}" created successfully!`);
+    } catch (error) {
+      console.error('Error saving course:', error);
+      alert('Error creating course. Please try again.');
+    }
+    
+    // Close the dialog
+    handleCourseFormClose();
+    
+    // Navigate to the new course - include a small delay to ensure state is updated
+    setTimeout(() => {
+      navigate(`/instructor/courses/${newCourse.id}`);
+    }, 100);
+  };
   
   // Load courses
   useEffect(() => {
@@ -128,8 +229,25 @@ const CourseManagement = () => {
         
         // For now, use mock data with a simulated API delay
         setTimeout(() => {
-          // Check localStorage for any saved assessments
+          // First check localStorage for any saved courses
           try {
+            const savedCoursesString = localStorage.getItem('savedCourses');
+            let allCourses = [...mockCourses]; // Start with mock courses
+            
+            if (savedCoursesString) {
+              const savedCourses = JSON.parse(savedCoursesString);
+              console.log('Found saved courses:', savedCourses);
+              
+              // Add saved courses to the list (don't duplicate existing ones)
+              savedCourses.forEach(savedCourse => {
+                // Check if this course already exists in the mock data
+                if (!allCourses.some(c => c.id === savedCourse.id)) {
+                  allCourses.push(savedCourse);
+                }
+              });
+            }
+            
+            // Now check for any saved assessments 
             const savedAssessmentsString = localStorage.getItem('savedAssessments');
             let savedAssessments = [];
             
@@ -137,15 +255,15 @@ const CourseManagement = () => {
               savedAssessments = JSON.parse(savedAssessmentsString);
               console.log('Found saved assessments:', savedAssessments);
               
-              // Update the mock courses with saved assessments
-              const updatedCourses = mockCourses.map(course => {
+              // Update all courses with saved assessments
+              allCourses = allCourses.map(course => {
                 const courseAssessments = savedAssessments.filter(a => a.courseId === course.id);
                 
                 if (courseAssessments.length > 0) {
                   return {
                     ...course,
                     assessments: [
-                      ...course.assessments,
+                      ...(course.assessments || []),
                       ...courseAssessments.map(a => ({
                         id: a.id || `saved-${Date.now()}`,
                         title: a.title,
@@ -157,33 +275,26 @@ const CourseManagement = () => {
                         assignToAllStudents: a.assignToAllStudents
                       }))
                     ],
-                    assessmentCount: course.assessmentCount + courseAssessments.length
+                    assessmentCount: (course.assessmentCount || 0) + courseAssessments.length
                   };
                 }
                 
                 return course;
               });
-              
-              setCourses(updatedCourses);
-              
-              if (courseId) {
-                const course = updatedCourses.find(c => c.id === courseId);
-                if (course) {
-                  setSelectedCourse(course);
-                }
-              }
-            } else {
-              setCourses(mockCourses);
-              
-              if (courseId) {
-                const course = mockCourses.find(c => c.id === courseId);
-                if (course) {
-                  setSelectedCourse(course);
-                }
+            }
+            
+            setCourses(allCourses);
+            
+            if (courseId) {
+              const course = allCourses.find(c => c.id === courseId);
+              if (course) {
+                setSelectedCourse(course);
               }
             }
+            
+            setLoading(false);
           } catch (error) {
-            console.error('Error processing saved assessments:', error);
+            console.error('Error processing saved data:', error);
             setCourses(mockCourses);
             
             if (courseId) {
@@ -192,9 +303,9 @@ const CourseManagement = () => {
                 setSelectedCourse(course);
               }
             }
+            
+            setLoading(false);
           }
-          
-          setLoading(false);
         }, 1000);
       } catch (error) {
         console.error('Error fetching course data:', error);
@@ -226,13 +337,12 @@ const CourseManagement = () => {
   
   // Handle create new course
   const handleCreateCourse = () => {
-    // In a real app, this would navigate to a course creation form
-    console.log('Create new course');
+    handleCourseFormOpen();
   };
   
   // Handle menu open
-  const handleMenuOpen = (event) => {
-    setAnchorEl(event.currentTarget);
+  const handleMenuOpen = (event, course) => {
+    setAnchorEl({ element: event.currentTarget, course: course });
   };
   
   // Handle menu close
@@ -259,16 +369,72 @@ const CourseManagement = () => {
     switch (dialogAction) {
       case 'delete-course':
         console.log('Delete course:', dialogItem);
+        // Remove course from local state
+        const updatedCourses = courses.filter(course => course.id !== dialogItem.id);
+        setCourses(updatedCourses);
+        
+        // Remove from localStorage
+        try {
+          const savedCoursesString = localStorage.getItem('savedCourses');
+          if (savedCoursesString) {
+            let savedCourses = JSON.parse(savedCoursesString);
+            savedCourses = savedCourses.filter(course => course.id !== dialogItem.id);
+            localStorage.setItem('savedCourses', JSON.stringify(savedCourses));
+          }
+          
+          // Also remove any related assessments
+          const savedAssessmentsString = localStorage.getItem('savedAssessments');
+          if (savedAssessmentsString) {
+            let savedAssessments = JSON.parse(savedAssessmentsString);
+            savedAssessments = savedAssessments.filter(assessment => assessment.courseId !== dialogItem.id);
+            localStorage.setItem('savedAssessments', JSON.stringify(savedAssessments));
+          }
+          
+          alert(`Course "${dialogItem.title}" has been deleted.`);
+        } catch (error) {
+          console.error('Error deleting course from localStorage:', error);
+        }
+        
+        // Navigate back to course list
         navigate('/instructor/courses');
         break;
       case 'delete-assessment':
         console.log('Delete assessment:', dialogItem);
+        // Remove assessment from course
+        setSelectedCourse(prevCourse => ({
+          ...prevCourse,
+          assessments: prevCourse.assessments.filter(a => a.id !== dialogItem.id),
+          assessmentCount: prevCourse.assessmentCount - 1
+        }));
+        
+        // Remove from localStorage if it exists there
+        try {
+          const savedAssessmentsString = localStorage.getItem('savedAssessments');
+          if (savedAssessmentsString) {
+            let savedAssessments = JSON.parse(savedAssessmentsString);
+            savedAssessments = savedAssessments.filter(a => a.id !== dialogItem.id);
+            localStorage.setItem('savedAssessments', JSON.stringify(savedAssessments));
+          }
+        } catch (error) {
+          console.error('Error deleting assessment from localStorage:', error);
+        }
         break;
       case 'delete-material':
         console.log('Delete material:', dialogItem);
+        // Remove material from course
+        setSelectedCourse(prevCourse => ({
+          ...prevCourse,
+          materials: prevCourse.materials.filter(m => m.id !== dialogItem.id)
+        }));
         break;
       case 'remove-student':
         console.log('Remove student:', dialogItem);
+        // Remove student from course
+        setSelectedCourse(prevCourse => ({
+          ...prevCourse,
+          students: prevCourse.students.filter(s => s.id !== dialogItem.id),
+          enrollment: prevCourse.enrollment - 1
+        }));
         break;
       default:
         break;
@@ -333,17 +499,17 @@ const CourseManagement = () => {
                     </Typography>
                     <IconButton 
                       size="small" 
-                      onClick={handleMenuOpen}
+                      onClick={(event) => handleMenuOpen(event, course)}
                       aria-label="course options"
                     >
                       <MoreVertIcon />
                     </IconButton>
                     <Menu
-                      anchorEl={anchorEl}
+                      anchorEl={anchorEl?.element}
                       open={Boolean(anchorEl)}
                       onClose={handleMenuClose}
                     >
-                      <MenuItem onClick={() => handleOpenDialog('delete-course', course)}>
+                      <MenuItem onClick={() => handleOpenDialog('delete-course', anchorEl?.course)}>
                         <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
                         Delete Course
                       </MenuItem>
@@ -412,6 +578,68 @@ const CourseManagement = () => {
             <Button onClick={handleConfirmDialog} color="error">Delete</Button>
           </DialogActions>
         </Dialog>
+
+        {/* Course Form Dialog */}
+        <Dialog
+          open={openCourseFormDialog}
+          onClose={handleCourseFormClose}
+        >
+          <DialogTitle>Create New Course</DialogTitle>
+          <DialogContent>
+            <TextField
+              autoFocus
+              margin="dense"
+              name="title"
+              label="Course Title"
+              type="text"
+              fullWidth
+              value={newCourseData.title}
+              onChange={handleCourseFormChange}
+            />
+            <TextField
+              margin="dense"
+              name="code"
+              label="Course Code"
+              type="text"
+              fullWidth
+              value={newCourseData.code}
+              onChange={handleCourseFormChange}
+            />
+            <TextField
+              margin="dense"
+              name="department"
+              label="Department"
+              type="text"
+              fullWidth
+              value={newCourseData.department}
+              onChange={handleCourseFormChange}
+            />
+            <TextField
+              margin="dense"
+              name="term"
+              label="Term"
+              type="text"
+              fullWidth
+              value={newCourseData.term}
+              onChange={handleCourseFormChange}
+            />
+            <TextField
+              margin="dense"
+              name="description"
+              label="Description"
+              type="text"
+              fullWidth
+              multiline
+              rows={4}
+              value={newCourseData.description}
+              onChange={handleCourseFormChange}
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleCourseFormClose}>Cancel</Button>
+            <Button onClick={handleCourseFormSubmit} color="primary">Create</Button>
+          </DialogActions>
+        </Dialog>
       </Container>
     );
   }
@@ -422,7 +650,7 @@ const CourseManagement = () => {
       <Box sx={{ mb: 4 }}>
         <Button 
           startIcon={<ArrowBackIcon />} 
-          onClick={() => navigate('/instructor/courses')} 
+          onClick={handleBackToCourses} 
           variant="outlined"
           sx={{ mb: 2 }}
         >
@@ -437,6 +665,16 @@ const CourseManagement = () => {
             startIcon={<AutoGraphIcon />}
             component={RouterLink}
             to={`/instructor/curriculum/${selectedCourse.id}`}
+            onClick={() => {
+              // Store the course details in localStorage before navigating
+              localStorage.setItem('currentCourse', JSON.stringify({
+                id: selectedCourse.id,
+                title: selectedCourse.title,
+                code: selectedCourse.code,
+                description: selectedCourse.description,
+                topics: selectedCourse.topics || []
+              }));
+            }}
           >
             Curriculum Mapping
           </Button>
@@ -477,11 +715,11 @@ const CourseManagement = () => {
         
         <TableContainer component={Paper} variant="outlined">
           <Table>
-            <TableHead>
-              <TableRow>
+            <TableHead>              <TableRow>
                 <TableCell>Assessment Title</TableCell>
                 <TableCell>Syllabus Title</TableCell>
                 <TableCell>Type</TableCell>
+                <TableCell>Pattern</TableCell>
                 <TableCell>Due Date</TableCell>
                 <TableCell align="right">Submissions</TableCell>
                 <TableCell align="right">Avg. Score</TableCell>
@@ -494,11 +732,21 @@ const CourseManagement = () => {
                 <TableRow key={assessment.id}>
                   <TableCell component="th" scope="row">
                     {assessment.title}
-                  </TableCell>
-                  <TableCell>
+                  </TableCell>                  <TableCell>
                     {assessment.syllabusTitle || 'N/A'}
                   </TableCell>
                   <TableCell>{assessment.type}</TableCell>
+                  <TableCell>
+                    {assessment.visibility && assessment.visibility.pattern ? (
+                      <Tooltip title={assessment.visibility.pattern.description || 'No description available'}>
+                        <span>{assessment.visibility.pattern.name} • {assessment.visibility.pattern.difficulty}</span>
+                      </Tooltip>
+                    ) : assessment.pattern ? (
+                      <Tooltip title={assessment.pattern.description || 'No description available'}>
+                        <span>{assessment.pattern.name} • {assessment.pattern.difficulty}</span>
+                      </Tooltip>
+                    ) : 'Standard'}
+                  </TableCell>
                   <TableCell>{new Date(assessment.dueDate).toLocaleDateString()}</TableCell>
                   <TableCell align="right">
                     {assessment.submissions}/{selectedCourse.enrollment}

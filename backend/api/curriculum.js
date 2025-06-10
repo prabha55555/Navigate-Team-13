@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/auth');
+const auth = require('../middlewares/auth');
+const { generateCurriculumMap, generateLearningOutcomes, generateLearningOutcomesFromDescription } = require('../services/curriculumService');
 
 // Mock data for demonstration purposes
 const courses = [
@@ -179,6 +181,112 @@ router.get('/map/:courseId', authMiddleware, (req, res) => {
   } catch (err) {
     console.error('Error fetching curriculum map:', err);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/curriculum/generate
+// @desc    Generate curriculum mapping with Gemini AI
+// @access  Private (Instructor)
+router.post('/generate', auth, async (req, res) => {
+  try {
+    const { courseTitle, courseDescription = '' } = req.body;
+    
+    if (!courseTitle) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Course title is required' 
+      });
+    }
+    
+    const result = await generateCurriculumMap(courseTitle, courseDescription);
+    
+    return res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error generating curriculum map:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error generating curriculum map',
+      error: error.message
+    });
+  }
+});
+
+// @route   POST /api/curriculum/generate-outcomes
+// @desc    Generate learning outcomes from topics using Gemini AI
+// @access  Private (Instructor)
+router.post('/generate-outcomes', auth, async (req, res) => {
+  try {
+    const { courseTitle, courseDescription, topics } = req.body;
+    
+    if (!courseTitle) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Course title is required' 
+      });
+    }
+    
+    if (!topics || !Array.isArray(topics) || topics.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Topics array is required and cannot be empty' 
+      });
+    }
+    
+    // Call the service function to generate learning outcomes from topics
+    const learningOutcomes = await generateLearningOutcomes(courseTitle, courseDescription, topics);
+    
+    return res.status(200).json({
+      success: true,
+      learningOutcomes
+    });
+  } catch (error) {
+    console.error('Error generating learning outcomes:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error generating learning outcomes',
+      error: error.message
+    });
+  }
+});
+
+// @route   POST /api/curriculum/generate-outcomes-from-description
+// @desc    Generate learning outcomes directly from course description using Gemini AI
+// @access  Private (Instructor)
+router.post('/generate-outcomes-from-description', auth, async (req, res) => {
+  try {
+    const { courseTitle, courseDescription } = req.body;
+    
+    if (!courseTitle) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Course title is required' 
+      });
+    }
+    
+    if (!courseDescription) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Course description is required' 
+      });
+    }
+    
+    // Call the service function to generate learning outcomes from description
+    const learningOutcomes = await generateLearningOutcomesFromDescription(courseTitle, courseDescription);
+    
+    return res.status(200).json({
+      success: true,
+      learningOutcomes
+    });
+  } catch (error) {
+    console.error('Error generating learning outcomes from description:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error generating learning outcomes',
+      error: error.message
+    });
   }
 });
 

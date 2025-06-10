@@ -29,10 +29,9 @@ export const uploadSyllabus = async (file, metadata = {}) => {
     if (metadata) {
       Object.keys(metadata).forEach(key => {
         formData.append(key, metadata[key]);
-      });
-    }
+      });    }
     
-    const response = await axios.post(`${API_URL}/assessment/upload-syllabus`, formData, {
+    const response = await axios.post(`${API_URL}/instructor/assessment/upload-syllabus`, formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
         'x-auth-token': localStorage.getItem('token')
@@ -55,7 +54,7 @@ export const uploadSyllabus = async (file, metadata = {}) => {
 export const analyzeSyllabus = async (syllabusContent, courseId) => {
   try {
     const response = await axios.post(
-      `${API_URL}/assessment/analyze-syllabus`, 
+      `${API_URL}/instructor/assessment/analyze-syllabus`, 
       { syllabusContent, courseId }, 
       configureAxios()
     );
@@ -77,7 +76,7 @@ export const generateAssessment = async (syllabusAnalysis, pattern, courseId) =>
   try {
     // Make request to generate assessment
     const response = await axios.post(
-      `${API_URL}/assessment/generate-questions`,
+      `${API_URL}/instructor/assessment/generate-questions`,
       { 
         syllabusAnalysis, 
         pattern,
@@ -104,7 +103,7 @@ export const generateAssessment = async (syllabusAnalysis, pattern, courseId) =>
 export const getSyllabiList = async () => {
   try {
     const response = await axios.get(
-      `${API_URL}/assessment/syllabus/list`,
+      `${API_URL}/instructor/assessment/syllabus/list`,
       configureAxios()
     );
     
@@ -127,7 +126,7 @@ export const getSyllabiList = async () => {
 export const getSyllabusAnalysis = async (id) => {
   try {
     const response = await axios.get(
-      `${API_URL}/assessment/syllabus/${id}`,
+      `${API_URL}/instructor/assessment/syllabus/${id}`,
       configureAxios()
     );
     
@@ -153,7 +152,7 @@ export const getSyllabusAnalysis = async (id) => {
 export const iterateQuiz = async (syllabusId, currentQuiz, feedback, parameters) => {
   try {
     const response = await axios.post(
-      `${API_URL}/assessment/iterate-quiz`,
+      `${API_URL}/instructor/assessment/iterate-quiz`,
       {
         syllabusId,
         currentQuiz,

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 // Create the authentication context
 const AuthContext = createContext();
@@ -84,7 +84,6 @@ export const AuthProvider = ({ children }) => {
       axios.interceptors.response.eject(interceptor);
     };
   }, [refreshToken, refreshAccessToken]);
-
   // Function to register a new user
   const register = async (name, email, password, role = 'student') => {
     try {
@@ -101,6 +100,12 @@ export const AuthProvider = ({ children }) => {
       // Save tokens to localStorage and state
       localStorage.setItem('token', authToken);
       localStorage.setItem('refreshToken', authRefreshToken);
+      localStorage.setItem('userRole', user.role); // Store role separately for direct access
+      setToken(authToken);
+      setRefreshToken(authRefreshToken);
+      setCurrentUser(user);
+      localStorage.setItem('token', authToken);
+      localStorage.setItem('refreshToken', authRefreshToken);
       setToken(authToken);
       setRefreshToken(authRefreshToken);
       setCurrentUser(user);
@@ -112,7 +117,6 @@ export const AuthProvider = ({ children }) => {
       throw new Error(message);
     }
   };
-
   // Function to login
   const login = async (email, password) => {
     try {
@@ -127,6 +131,7 @@ export const AuthProvider = ({ children }) => {
       // Save tokens to localStorage and state
       localStorage.setItem('token', authToken);
       localStorage.setItem('refreshToken', authRefreshToken);
+      localStorage.setItem('userRole', user.role); // Store role separately for direct access
       setToken(authToken);
       setRefreshToken(authRefreshToken);
       setCurrentUser(user);
@@ -147,11 +152,11 @@ export const AuthProvider = ({ children }) => {
         await axios.post('/api/auth/logout', { refreshToken });
       }
     } catch (err) {
-      console.error('Logout error:', err);
-    } finally {
+      console.error('Logout error:', err);    } finally {
       // Clean up local storage and state regardless of server response
       localStorage.removeItem('token');
       localStorage.removeItem('refreshToken');
+      localStorage.removeItem('userRole'); // Also remove user role
       setToken(null);
       setRefreshToken(null);
       setCurrentUser(null);
@@ -166,7 +171,6 @@ export const AuthProvider = ({ children }) => {
       delete axios.defaults.headers.common['x-auth-token'];
     }
   }, [token]);
-
   // Load user data on app startup
   useEffect(() => {
     const loadUser = async () => {
@@ -178,6 +182,11 @@ export const AuthProvider = ({ children }) => {
       try {
         const res = await axios.get('/api/auth/me');
         setCurrentUser(res.data.user);
+        
+        // Also store the user role in localStorage for direct access
+        if (res.data.user && res.data.user.role) {
+          localStorage.setItem('userRole', res.data.user.role);
+        }
       } catch (err) {
         console.error('Error loading user', err);
         // Error will be handled by the interceptor

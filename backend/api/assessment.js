@@ -417,18 +417,27 @@ router.post('/save', authMiddleware, async (req, res) => {
       });
     }
     
+    // Generate a unique assessment ID
+    const assessmentId = `assessment-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    
     // Create assessment document
     const assessment = {
+      id: assessmentId,
       title,
       description,
       courseId,
+      courseName: 'Data Structures and Algorithms in Java', // In real app, fetch from course table
       questions,
       timeLimit: timeLimit || 60,
       totalPoints: totalPoints || questions.reduce((sum, q) => sum + (q.points || 0), 0),
       createdBy: req.user.id,
-      createdAt: new Date(),
+      createdAt: new Date().toISOString(),
+      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days from now
       assignToAllStudents: assignToAllStudents || false,
       syllabusTitle: syllabusTitle || '',
+      status: assignToAllStudents ? 'published' : 'draft',
+      isPublished: assignToAllStudents || false,
+      visibleToStudents: assignToAllStudents || false,
       visibility: visibility || {
         instructorCanSeeAnswers: true,
         studentsCanSeeAnswers: false,
@@ -436,8 +445,26 @@ router.post('/save', authMiddleware, async (req, res) => {
       }
     };
     
-    // In a real implementation, you would save to the database
-    // For now, we'll simulate a successful save
+    // Store the assessment in environment variable for mock persistence
+    let savedAssessments = [];
+    try {
+      if (process.env.SAVED_ASSESSMENTS) {
+        savedAssessments = JSON.parse(process.env.SAVED_ASSESSMENTS);
+      }
+    } catch (e) {
+      console.warn('Error parsing existing saved assessments:', e);
+      savedAssessments = [];
+    }
+    
+    // Add the new assessment
+    savedAssessments.push(assessment);
+    
+    // Update the environment variable
+    process.env.SAVED_ASSESSMENTS = JSON.stringify(savedAssessments);
+    
+    console.log(`Assessment saved with ID: ${assessmentId}`);
+    console.log(`Assigned to all students: ${assignToAllStudents}`);
+    console.log(`Total saved assessments: ${savedAssessments.length}`);
     
     // If assignToAllStudents is true, we would also create assignments for all students in the course
     const assignmentStatus = assessment.assignToAllStudents 
@@ -447,7 +474,7 @@ router.post('/save', authMiddleware, async (req, res) => {
     res.status(200).json({
       success: true,
       message: `Assessment saved successfully. ${assignmentStatus}`,
-      assessmentId: '12345', // This would be the actual ID from the database
+      assessmentId: assessmentId,
       assessment
     });
   } catch (error) {
@@ -466,37 +493,106 @@ router.get('/student/:assessmentId', authMiddleware, async (req, res) => {
   try {
     const { assessmentId } = req.params;
     
-    // In a real implementation, you would fetch from database
-    // For now, we'll use a mock assessment
+    console.log(`Student requesting assessment: ${assessmentId}`);
+    
+    // Get all saved assessments from environment variable
+    let savedAssessments = [];
+    try {
+      if (process.env.SAVED_ASSESSMENTS) {
+        savedAssessments = JSON.parse(process.env.SAVED_ASSESSMENTS);
+      }
+    } catch (e) {
+      console.warn('Error parsing saved assessments:', e);
+      savedAssessments = [];
+    }
+    
+    // Find the assessment
+    const assessment = savedAssessments.find(a => a.id === assessmentId);
+    
+    if (!assessment) {
+      console.log(`Assessment ${assessmentId} not found in saved assessments`);
+      // Fallback to mock assessment for testing
+      const mockAssessment = {
+        id: assessmentId,
+        title: 'Java Data Structures Assessment',
+        description: 'Test your knowledge on Java data structures implementation and concepts',
+        courseId: '1',
+        courseName: 'Data Structures and Algorithms in Java',
+        timeLimit: 60,
+        totalPoints: 100,
+        dueDate: '2025-12-10',
+        questions: [
+          {
+            id: '1',
+            text: 'Which Java collection interface is implemented by ArrayList and LinkedList?',
+            type: 'multiple-choice',
+            options: ['Set', 'List', 'Queue', 'Map'],
+            points: 5
+          },
+          {
+            id: '2',
+            text: 'In Java, which data structure would be most appropriate for implementing a FIFO (First In First Out) queue?',
+            type: 'multiple-choice',
+            options: ['java.util.Stack', 'java.util.LinkedList', 'java.util.TreeSet', 'java.util.HashMap'],
+            points: 5
+          },
+          {
+            id: '3',
+            text: 'What is the time complexity of the add() operation in a Java ArrayList when the internal array does not need resizing?',
+            type: 'multiple-choice',
+            options: ['O(1)', 'O(log n)', 'O(n)', 'O(n²)'],
+            points: 5
+          },
+          {
+            id: '8',
+            text: 'Explain the concept of hashing in Java collections and how collision resolution is handled in HashMap.',
+            type: 'short-answer',
+            points: 15
+          }
+        ]
+      };
+      
+      return res.status(200).json({
+        success: true,
+        assessment: mockAssessment
+      });
+    }
+    
+    // Check if assessment is available to students
+    if (!assessment.assignToAllStudents || !assessment.visibleToStudents) {
+      return res.status(403).json({
+        success: false,
+        message: 'Assessment not available to students'
+      });
+    }
     
     // Create a filtered version that only shows what students should see
-    // based on the visibility settings
-    const assessment = {
-      id: assessmentId,
-      title: 'Midterm Exam',
-      description: 'Test your knowledge on basic data structures',
-      courseId: '1',
-      courseName: 'Data Structures and Algorithms',
-      timeLimit: 60,
-      totalPoints: 100,
-      dueDate: '2025-12-10',
-      // Filter out answers and other instructor-only information
-      questions: [
-        {
-          id: '1',
-          text: 'Which data structure uses LIFO (Last In First Out) principle?',
-          type: 'multiple-choice',
-          options: ['Queue', 'Stack', 'Linked List', 'Tree'],
-          points: 5
-          // Note: correctAnswer is omitted for students
-        },
-        // More questions...
-      ]
+    const studentAssessment = {
+      id: assessment.id,
+      title: assessment.title,
+      description: assessment.description,
+      courseId: assessment.courseId,
+      courseName: assessment.courseName,
+      timeLimit: assessment.timeLimit,
+      totalPoints: assessment.totalPoints,
+      dueDate: assessment.dueDate,
+      questions: assessment.questions.map(q => ({
+        id: q.id,
+        question: q.question || q.text,
+        questionType: q.questionType || q.type,
+        type: q.questionType || q.type,
+        text: q.question || q.text,
+        options: q.options || [],
+        points: q.points || 1
+        // Note: correctAnswer is intentionally omitted for students
+      }))
     };
+    
+    console.log(`Returning assessment "${studentAssessment.title}" with ${studentAssessment.questions.length} questions`);
     
     res.status(200).json({
       success: true,
-      assessment
+      assessment: studentAssessment
     });
   } catch (error) {
     console.error('Error retrieving assessment for student:', error);
@@ -518,6 +614,11 @@ router.post('/submit', authMiddleware, async (req, res) => {
       timeSpent 
     } = req.body;
     
+    console.log('=== ASSESSMENT SUBMISSION (main route) ===');
+    console.log('Student ID:', req.user.id);
+    console.log('Assessment ID:', assessmentId);
+    console.log('Answers:', answers);
+    
     if (!assessmentId || !answers || typeof answers !== 'object') {
       return res.status(400).json({
         success: false,
@@ -525,30 +626,221 @@ router.post('/submit', authMiddleware, async (req, res) => {
       });
     }
     
-    // In a real implementation, you would:
-    // 1. Validate the assessmentId exists and is available to the student
-    // 2. Calculate the score based on answers
-    // 3. Save the submission to the database
-    // 4. Update the student's progress
+    // Get all saved assessments
+    let savedAssessments = [];
+    try {
+      if (process.env.SAVED_ASSESSMENTS) {
+        savedAssessments = JSON.parse(process.env.SAVED_ASSESSMENTS);
+      }
+    } catch (e) {
+      console.warn('Error parsing saved assessments:', e);
+    }
     
-    // For now, simulate a successful submission
+    const assessment = savedAssessments.find(a => a.id === assessmentId);
+    
+    if (!assessment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assessment not found'
+      });
+    }
+      // Calculate score with improved validation
+    let score = 0;
+    let maxScore = 0;
+    const questionResults = [];
+    const detailedAnswers = [];
+    
+    assessment.questions.forEach(question => {
+      const questionId = question.id;
+      const studentAnswer = answers[questionId];
+      const correctAnswer = question.correctAnswer;
+      const points = question.points || 1;
+      
+      maxScore += points;
+      
+      let isCorrect = false;
+      let partialCredit = 0;
+      let feedback = '';
+      
+      console.log(`Validating Question ${questionId}: student="${studentAnswer}", correct="${correctAnswer}"`);
+      
+      if (studentAnswer !== undefined && studentAnswer !== null && studentAnswer !== '') {
+        const questionType = question.questionType || question.type;
+        
+        if (questionType === 'multiple-choice') {
+          isCorrect = studentAnswer === correctAnswer;
+          feedback = isCorrect ? 'Correct answer!' : `Incorrect. The correct answer is: ${correctAnswer}`;
+        } else if (questionType === 'true-false') {
+          isCorrect = String(studentAnswer).toLowerCase() === String(correctAnswer).toLowerCase();
+          feedback = isCorrect ? 'Correct!' : `Incorrect. The correct answer is: ${correctAnswer}`;
+        } else if (questionType === 'multiple-select') {
+          if (Array.isArray(studentAnswer) && Array.isArray(correctAnswer)) {
+            const studentSet = new Set(studentAnswer);
+            const correctSet = new Set(correctAnswer);
+            isCorrect = studentSet.size === correctSet.size && 
+                       [...studentSet].every(x => correctSet.has(x));
+            feedback = isCorrect ? 'All correct selections!' : 'Some selections were incorrect.';
+          }        } else if (questionType === 'short-answer') {
+          const answerText = typeof studentAnswer === 'string' ? studentAnswer.trim() : String(studentAnswer);
+          const answerLength = answerText.length;
+          if (answerLength >= 50) {
+            partialCredit = points; // Full credit for detailed answers
+            isCorrect = true;
+            feedback = 'Good detailed answer!';
+          } else if (answerLength >= 20) {
+            partialCredit = Math.ceil(points * 0.7); // 70% credit
+            feedback = 'Good answer, but could be more detailed.';
+          } else if (answerLength >= 10) {
+            partialCredit = Math.ceil(points * 0.5); // 50% credit
+            feedback = 'Brief answer provided, needs more detail.';
+          } else {
+            feedback = 'Answer too brief. Please provide more details.';
+          }
+        }
+      } else {
+        feedback = 'No answer provided.';
+      }
+      
+      const earnedPoints = isCorrect ? points : partialCredit;
+      score += earnedPoints;
+      
+      console.log(`Question ${questionId}: ${earnedPoints}/${points} points`);
+      
+      questionResults.push({
+        questionId,
+        correct: isCorrect,
+        score: earnedPoints,
+        maxScore: points,
+        studentAnswer,
+        feedback,
+        partialCredit: partialCredit > 0 && !isCorrect
+      });
+      
+      // Store detailed answer for plagiarism checking
+      detailedAnswers.push({
+        questionId,
+        answer: studentAnswer,
+        questionText: question.question || question.text,
+        questionType: question.questionType || question.type
+      });
+    });
+      // Create submission record
     const submission = {
-      id: Math.random().toString(36).substring(2, 10),
+      id: `submission-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
       assessmentId,
       studentId: req.user.id,
       answers,
       timeSpent: timeSpent || 0,
-      score: 85, // This would be calculated
-      maxScore: 100,
-      submittedAt: new Date()
+      score,
+      maxScore,
+      submittedAt: new Date().toISOString(),
+      questionResults,
+      detailedAnswers
     };
+
+    console.log(`Creating submission: score ${score}/${maxScore}, ${questionResults.length} questions processed`);
+
+    // Run plagiarism detection for text-based answers
+    let plagiarismResults = null;
+    try {
+      const textAnswers = detailedAnswers.filter(a => 
+        a.answer && 
+        typeof a.answer === 'string' && 
+        a.answer.trim().length > 30 &&
+        (a.questionType === 'short-answer' || a.questionType === 'essay')
+      );
+
+      if (textAnswers.length > 0) {
+        console.log(`Running plagiarism check on ${textAnswers.length} text answers...`);
+        
+        plagiarismResults = await plagiarismService.checkSubmission({
+          submissionId: submission.id,
+          studentId: req.user.id,
+          assessmentId,
+          answers: textAnswers,
+          assessmentDetails: assessment
+        });
+        
+        console.log('Plagiarism check completed:', plagiarismResults?.isPlagiarismDetected ? 'FLAGGED' : 'CLEAN');
+      }
+    } catch (plagiarismError) {
+      console.warn('Plagiarism check failed:', plagiarismError.message);
+      plagiarismResults = {
+        isPlagiarismDetected: false,
+        overallSimilarityScore: 0,
+        error: plagiarismError.message
+      };
+    }
+
+    // Generate AI feedback and recommendations
+    let aiFeedback = null;
+    let personalizedRecommendations = null;
+    
+    try {
+      console.log('Generating AI feedback and recommendations...');
+      
+      // Generate overall feedback based on performance
+      const percentage = Math.round((score / maxScore) * 100);
+      
+      aiFeedback = {
+        overallFeedback: generateOverallFeedback(percentage, questionResults),
+        questionFeedback: questionResults.reduce((feedback, result) => {
+          if (result.feedback) {
+            feedback[result.questionId] = result.feedback;
+          }
+          return feedback;
+        }, {}),
+        strengths: identifyStrengths(questionResults, assessment.questions),
+        weaknesses: identifyWeaknesses(questionResults, assessment.questions),
+        studyRecommendations: generateStudyRecommendations(questionResults, assessment.questions)
+      };
+
+      // Generate personalized learning recommendations
+      personalizedRecommendations = generatePersonalizedRecommendations(
+        questionResults, 
+        assessment.questions, 
+        percentage
+      );
+      
+      console.log('AI feedback and recommendations generated successfully');
+      
+    } catch (feedbackError) {
+      console.warn('AI feedback generation failed:', feedbackError.message);
+      aiFeedback = {
+        overallFeedback: `You scored ${score}/${maxScore} points (${Math.round((score/maxScore)*100)}%). Keep practicing to improve your understanding.`,
+        questionFeedback: {},
+        error: feedbackError.message
+      };
+    }
+
+    // Add results to submission
+    submission.plagiarismResults = plagiarismResults;
+    submission.aiFeedback = aiFeedback;
+    submission.personalizedRecommendations = personalizedRecommendations;
+    submission.feedback = aiFeedback; // For backward compatibility
+    
+    // Store submission (in production, save to database)
+    let submissions = [];
+    try {
+      if (process.env.STUDENT_SUBMISSIONS) {
+        submissions = JSON.parse(process.env.STUDENT_SUBMISSIONS);
+      }
+    } catch (e) {
+      submissions = [];
+    }
+    
+    submissions.push(submission);
+    process.env.STUDENT_SUBMISSIONS = JSON.stringify(submissions);
+    
+    console.log(`Assessment submitted successfully. Score: ${score}/${maxScore}`);
     
     res.status(200).json({
       success: true,
       message: 'Assessment submitted successfully',
       submissionId: submission.id,
       score: submission.score,
-      maxScore: submission.maxScore
+      maxScore: submission.maxScore,
+      percentage: Math.round((score / maxScore) * 100)
     });
   } catch (error) {
     console.error('Error submitting assessment:', error);
@@ -566,39 +858,63 @@ router.get('/results/:submissionId', authMiddleware, async (req, res) => {
   try {
     const { submissionId } = req.params;
     
-    // In a real implementation, you would fetch from database
-    // and apply appropriate visibility rules based on user role
+    console.log(`Fetching results for submission ID: ${submissionId}`);
     
-    // Assume we found the submission
-    const submission = {
-      id: submissionId,
-      assessmentId: '1',
-      assessment: {
-        title: 'Midterm Exam',
-        courseId: '1',
-        courseName: 'Data Structures and Algorithms'
-      },
-      studentId: '123',
-      studentName: 'Student Name',
-      score: 85,
-      maxScore: 100,
-      submittedAt: new Date().toISOString(),
-      timeSpent: 45,
-      answers: {
-        // Student answers here
-      },
-      questionResults: [
-        {
-          questionId: '1',
-          correct: true,
-          score: 5,
-          maxScore: 5,
-          feedback: 'Great job!'
-        },
-        // More question results...
-      ]
-    };
+    // Get stored submissions from environment variable
+    let submissions = [];
+    try {
+      if (process.env.STUDENT_SUBMISSIONS) {
+        submissions = JSON.parse(process.env.STUDENT_SUBMISSIONS);
+        console.log(`Found ${submissions.length} total submissions in storage`);
+      }
+    } catch (e) {
+      console.error('Error parsing stored submissions:', e);
+      submissions = [];
+    }
     
+    // Find the requested submission
+    const submission = submissions.find(s => s.id === submissionId);
+    
+    if (!submission) {
+      console.log(`Submission ${submissionId} not found`);
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+    
+    console.log(`Found submission for student ${submission.studentId}: score ${submission.score}/${submission.maxScore}`);
+    
+    // Get the assessment details to include in the response
+    let assessmentDetails = null;
+    try {
+      if (process.env.SAVED_ASSESSMENTS) {
+        const savedAssessments = JSON.parse(process.env.SAVED_ASSESSMENTS);
+        assessmentDetails = savedAssessments.find(a => 
+          a.id === submission.assessmentId || a._id === submission.assessmentId
+        );
+      }
+    } catch (e) {
+      console.warn('Error loading assessment details:', e);
+    }
+    
+    // Enhance submission with assessment details
+    const enhancedSubmission = {
+      ...submission,
+      assessment: assessmentDetails ? {
+        id: assessmentDetails.id || assessmentDetails._id,
+        title: assessmentDetails.title,
+        courseId: assessmentDetails.courseId,
+        courseName: assessmentDetails.courseName,
+        description: assessmentDetails.description,
+        timeLimit: assessmentDetails.timeLimit,
+        questions: assessmentDetails.questions
+      } : {
+        title: 'Assessment',
+        courseId: 'unknown',
+        courseName: 'Unknown Course'
+      }
+    };    
     // Check if user is authorized to view this submission
     // (either the student who submitted it or an instructor of the course)
     const isOwner = req.user.id === submission.studentId;
@@ -612,13 +928,26 @@ router.get('/results/:submissionId', authMiddleware, async (req, res) => {
     }
     
     // Apply visibility rules based on user role
-    let visibleSubmission = { ...submission };
+    let visibleSubmission = { ...enhancedSubmission };
     
-    // If student, maybe hide certain information
-    if (!isInstructor) {
-      // In the real implementation, this would depend on assessment settings
-      // For example, maybe don't show correct answers immediately
+    // If student, maybe hide certain information based on assessment settings
+    if (!isInstructor && assessmentDetails) {
+      // Check assessment visibility settings
+      const showAnswers = assessmentDetails.visibility?.studentsCanSeeAnswers || 
+                         assessmentDetails.visibility?.showResultsImmediately !== false;
+      
+      if (!showAnswers) {
+        // Hide correct answers if not allowed
+        if (visibleSubmission.assessment && visibleSubmission.assessment.questions) {
+          visibleSubmission.assessment.questions = visibleSubmission.assessment.questions.map(q => ({
+            ...q,
+            correctAnswer: undefined
+          }));
+        }
+      }
     }
+    
+    console.log(`Returning submission results for ${submissionId}`);
     
     res.status(200).json({
       success: true,
@@ -685,5 +1014,244 @@ router.get('/course/:courseId/submissions', authMiddleware, async (req, res) => 
     });
   }
 });
+
+// @route   GET /api/assessment/student/upcoming
+// @desc    Get upcoming assessments for a student
+// @access  Private (Student only)
+router.get('/student/upcoming', authMiddleware, async (req, res) => {
+  try {
+    console.log('Fetching upcoming assessments for student...');
+    
+    // Get all saved assessments from environment variable
+    let savedAssessments = [];
+    try {
+      if (process.env.SAVED_ASSESSMENTS) {
+        savedAssessments = JSON.parse(process.env.SAVED_ASSESSMENTS);
+        console.log(`Found ${savedAssessments.length} total saved assessments`);
+      }
+    } catch (e) {
+      console.warn('Error parsing saved assessments:', e);
+      savedAssessments = [];
+    }
+    
+    // Filter assessments that are:
+    // 1. Published/assigned to all students
+    // 2. Visible to students
+    // 3. Not yet due (optional)
+    const studentAssessments = savedAssessments
+      .filter(assessment => {
+        const isAssigned = assessment.assignToAllStudents === true;
+        const isPublished = assessment.status === 'published' || assessment.isPublished === true;
+        const isVisible = assessment.visibleToStudents === true;
+        
+        console.log(`Assessment ${assessment.id}: assigned=${isAssigned}, published=${isPublished}, visible=${isVisible}`);
+        
+        return isAssigned && (isPublished || isVisible);
+      })
+      .map(assessment => ({
+        id: assessment.id,
+        _id: assessment.id, // For compatibility
+        title: assessment.title,
+        description: assessment.description,
+        courseId: assessment.courseId,
+        courseName: assessment.courseName || 'Course',
+        dueDate: assessment.dueDate,
+        timeLimit: assessment.timeLimit,
+        totalPoints: assessment.totalPoints,
+        questionCount: assessment.questions?.length || 0,
+        createdAt: assessment.createdAt,
+        status: 'available',
+        course: {
+          _id: assessment.courseId,
+          title: assessment.courseName || 'Course'
+        }
+      }));
+    
+    console.log(`Returning ${studentAssessments.length} assessments for student`);
+    
+    res.status(200).json({
+      success: true,
+      assessments: studentAssessments,
+      count: studentAssessments.length
+    });
+  } catch (error) {
+    console.error('Error fetching student assessments:', error);
+    res.status(500).json({
+      success: false,
+      message: `Error fetching assessments: ${error.message}`
+    });
+  }
+});
+
+// Helper functions for feedback generation
+function generateOverallFeedback(percentage, questionResults) {
+  const correctCount = questionResults.filter(r => r.correct).length;
+  const totalCount = questionResults.length;
+  
+  if (percentage >= 90) {
+    return `Excellent work! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You demonstrate a strong understanding of the material. Keep up the great work and continue to challenge yourself with advanced topics.`;
+  } else if (percentage >= 80) {
+    return `Great job! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You have a good grasp of most concepts. Focus on the areas where you missed points to achieve even better results.`;
+  } else if (percentage >= 70) {
+    return `Good effort! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You understand many of the key concepts, but there's room for improvement. Review the areas where you lost points and practice more.`;
+  } else if (percentage >= 60) {
+    return `You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You have a basic understanding, but need to strengthen your knowledge. Focus on studying the fundamental concepts and practice regularly.`;
+  } else {
+    return `You scored ${percentage}% (${correctCount}/${totalCount} questions correct). This indicates significant gaps in understanding. I recommend reviewing the course materials thoroughly and seeking additional help from your instructor or study groups.`;
+  }
+}
+
+function identifyStrengths(questionResults, questions) {
+  const strengths = [];
+  const correctResults = questionResults.filter(r => r.correct);
+  
+  if (correctResults.length > 0) {
+    const questionTypes = {};
+    correctResults.forEach(result => {
+      const question = questions.find(q => q.id === result.questionId);
+      if (question) {
+        const type = question.questionType || question.type;
+        questionTypes[type] = (questionTypes[type] || 0) + 1;
+      }
+    });
+    
+    Object.entries(questionTypes).forEach(([type, count]) => {
+      if (count >= 2) {
+        strengths.push(`Strong performance in ${type.replace('-', ' ')} questions`);
+      }
+    });
+    
+    if (correctResults.length / questionResults.length > 0.8) {
+      strengths.push('Consistent accuracy across different question types');
+    }
+  }
+  
+  return strengths.length > 0 ? strengths : ['Completion of the assessment shows engagement with the material'];
+}
+
+function identifyWeaknesses(questionResults, questions) {
+  const weaknesses = [];
+  const incorrectResults = questionResults.filter(r => !r.correct);
+  
+  if (incorrectResults.length > 0) {
+    const questionTypes = {};
+    incorrectResults.forEach(result => {
+      const question = questions.find(q => q.id === result.questionId);
+      if (question) {
+        const type = question.questionType || question.type;
+        questionTypes[type] = (questionTypes[type] || 0) + 1;
+      }
+    });
+    
+    Object.entries(questionTypes).forEach(([type, count]) => {
+      if (count >= 2) {
+        weaknesses.push(`Need improvement in ${type.replace('-', ' ')} questions`);
+      }
+    });
+    
+    // Check for unanswered questions
+    const unanswered = questionResults.filter(r => !r.studentAnswer || r.studentAnswer === '');
+    if (unanswered.length > 0) {
+      weaknesses.push(`${unanswered.length} questions were left unanswered`);
+    }
+    
+    // Check for very brief short answers
+    const briefAnswers = questionResults.filter(r => {
+      const question = questions.find(q => q.id === r.questionId);
+      return question && 
+             (question.questionType === 'short-answer' || question.type === 'short-answer') &&
+             r.studentAnswer && 
+             r.studentAnswer.length < 20;
+    });
+    
+    if (briefAnswers.length > 0) {
+      weaknesses.push('Short answers need more detail and explanation');
+    }
+  }
+  
+  return weaknesses;
+}
+
+function generateStudyRecommendations(questionResults, questions) {
+  const recommendations = [];
+  const incorrectResults = questionResults.filter(r => !r.correct);
+  
+  if (incorrectResults.length > 0) {
+    recommendations.push('Review the course materials for topics you missed');
+    recommendations.push('Practice with additional exercises in your weak areas');
+    
+    const hasShortAnswers = questions.some(q => 
+      (q.questionType === 'short-answer' || q.type === 'short-answer')
+    );
+    
+    if (hasShortAnswers) {
+      recommendations.push('Practice writing detailed explanations for conceptual questions');
+    }
+    
+    const hasMultipleChoice = questions.some(q => 
+      (q.questionType === 'multiple-choice' || q.type === 'multiple-choice')
+    );
+    
+    if (hasMultipleChoice) {
+      recommendations.push('Study key definitions and factual knowledge');
+    }
+  }
+  
+  // Always add general recommendations
+  recommendations.push('Form study groups to discuss difficult concepts');
+  recommendations.push('Visit office hours if you need clarification on any topics');
+  
+  return recommendations;
+}
+
+function generatePersonalizedRecommendations(questionResults, questions, percentage) {
+  const recommendations = {
+    nextSteps: [],
+    resources: [],
+    practiceAreas: [],
+    difficultyLevel: 'intermediate'
+  };
+  
+  // Determine difficulty level for future content
+  if (percentage >= 85) {
+    recommendations.difficultyLevel = 'advanced';
+    recommendations.nextSteps.push('You\'re ready for advanced topics and challenges');
+    recommendations.nextSteps.push('Consider exploring additional optional materials');
+  } else if (percentage >= 70) {
+    recommendations.difficultyLevel = 'intermediate';
+    recommendations.nextSteps.push('Continue with the regular course progression');
+    recommendations.nextSteps.push('Focus on strengthening areas where you lost points');
+  } else {
+    recommendations.difficultyLevel = 'basic';
+    recommendations.nextSteps.push('Review fundamental concepts before moving forward');
+    recommendations.nextSteps.push('Consider additional tutoring or study sessions');
+  }
+  
+  // Generate practice areas based on missed questions
+  const missedTopics = new Set();
+  questionResults.filter(r => !r.correct).forEach(result => {
+    const question = questions.find(q => q.id === result.questionId);
+    if (question && question.topic) {
+      missedTopics.add(question.topic);
+    }
+  });
+  
+  recommendations.practiceAreas = Array.from(missedTopics);
+  
+  // Add general resources
+  recommendations.resources = [
+    'Course textbook and lecture notes',
+    'Online practice problems',
+    'Study groups and peer discussions',
+    'Instructor office hours'
+  ];
+  
+  if (percentage < 70) {
+    recommendations.resources.push('Additional tutoring resources');
+    recommendations.resources.push('Supplementary learning materials');
+  }
+  
+  return recommendations;
+}
 
 module.exports = router;
