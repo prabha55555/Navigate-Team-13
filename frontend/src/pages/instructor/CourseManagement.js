@@ -40,7 +40,10 @@ import {
     TableRow,
     Tabs,
     TextField,
+<<<<<<< HEAD
     Tooltip,
+=======
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
     Typography
 } from '@mui/material';
 import React, { useEffect, useState } from 'react';
@@ -213,7 +216,16 @@ const CourseManagement = () => {
     }, 100);
   };
   
-  // Load courses
+  // New state for course creation dialog
+  const [createCourseDialogOpen, setCreateCourseDialogOpen] = useState(false);
+  const [newCourse, setNewCourse] = useState({
+    title: '',
+    code: '',
+    department: 'Computer Science',
+    term: 'Fall 2025',
+    description: ''
+  });
+    // Load courses
   useEffect(() => {
     setLoading(true);
     
@@ -229,6 +241,7 @@ const CourseManagement = () => {
         
         // For now, use mock data with a simulated API delay
         setTimeout(() => {
+<<<<<<< HEAD
           // First check localStorage for any saved courses
           try {
             const savedCoursesString = localStorage.getItem('savedCourses');
@@ -289,6 +302,76 @@ const CourseManagement = () => {
               const course = allCourses.find(c => c.id === courseId);
               if (course) {
                 setSelectedCourse(course);
+=======
+          // Check localStorage for any saved courses first
+          try {
+            const savedCoursesString = localStorage.getItem('savedCourses');
+            if (savedCoursesString) {
+              const savedCourses = JSON.parse(savedCoursesString);
+              console.log('Found saved courses:', savedCourses);
+              
+              setCourses(savedCourses);
+              
+              if (courseId) {
+                const course = savedCourses.find(c => c.id === courseId);
+                if (course) {
+                  setSelectedCourse(course);
+                }
+              }
+            } else {
+              // Check localStorage for any saved assessments
+              const savedAssessmentsString = localStorage.getItem('savedAssessments');
+              let savedAssessments = [];
+              
+              if (savedAssessmentsString) {
+                savedAssessments = JSON.parse(savedAssessmentsString);
+                console.log('Found saved assessments:', savedAssessments);
+                
+                // Update the mock courses with saved assessments
+                const updatedCourses = mockCourses.map(course => {
+                  const courseAssessments = savedAssessments.filter(a => a.courseId === course.id);
+                  
+                  if (courseAssessments.length > 0) {
+                    return {
+                      ...course,
+                      assessments: [
+                        ...course.assessments,
+                        ...courseAssessments.map(a => ({
+                          id: a.id || `saved-${Date.now()}`,
+                          title: a.title,
+                          syllabusTitle: a.syllabusTitle || 'Generated Assessment',
+                          type: 'Quiz',
+                          dueDate: a.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                          avgScore: 0,
+                          submissions: 0,
+                          assignToAllStudents: a.assignToAllStudents
+                        }))
+                      ],
+                      assessmentCount: course.assessmentCount + courseAssessments.length
+                    };
+                  }
+                  
+                  return course;
+                });
+                
+                setCourses(updatedCourses);
+                
+                if (courseId) {
+                  const course = updatedCourses.find(c => c.id === courseId);
+                  if (course) {
+                    setSelectedCourse(course);
+                  }
+                }
+              } else {
+                setCourses(mockCourses);
+                
+                if (courseId) {
+                  const course = mockCourses.find(c => c.id === courseId);
+                  if (course) {
+                    setSelectedCourse(course);
+                  }
+                }
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
               }
             }
             
@@ -334,15 +417,73 @@ const CourseManagement = () => {
   const handleSelectCourse = (course) => {
     navigate(`/instructor/courses/${course.id}`);
   };
-  
-  // Handle create new course
+    // Handle create new course
   const handleCreateCourse = () => {
+<<<<<<< HEAD
     handleCourseFormOpen();
   };
   
   // Handle menu open
   const handleMenuOpen = (event, course) => {
     setAnchorEl({ element: event.currentTarget, course: course });
+=======
+    setCreateCourseDialogOpen(true);
+  };
+    // Handle course creation submission
+  const handleCreateCourseSubmit = () => {
+    // Validate required fields
+    if (!newCourse.title || !newCourse.code) {
+      return;
+    }
+    
+    // Create a new ID (in a real app this would come from the backend)
+    const newId = `course-${Date.now()}`;
+    
+    // Create the new course object
+    const courseToAdd = {
+      id: newId,
+      title: newCourse.title,
+      code: newCourse.code,
+      department: newCourse.department,
+      term: newCourse.term,
+      description: newCourse.description,
+      enrollment: 0,
+      assessmentCount: 0,
+      students: [],
+      assessments: [],
+      materials: []
+    };
+    
+    // Add the course to the courses list and save to localStorage
+    const updatedCourses = [...courses, courseToAdd];
+    setCourses(updatedCourses);
+    
+    // Save courses to localStorage
+    try {
+      localStorage.setItem('savedCourses', JSON.stringify(updatedCourses));
+      console.log('Saved courses to localStorage');
+    } catch (error) {
+      console.error('Error saving courses to localStorage:', error);
+    }
+    
+    // Close the dialog and reset the form
+    setCreateCourseDialogOpen(false);
+    setNewCourse({
+      title: '',
+      code: '',
+      department: 'Computer Science',
+      term: 'Fall 2025',
+      description: ''
+    });
+    
+    // Navigate to the new course
+    navigate(`/instructor/courses/${newId}`);
+  };
+    // Handle menu open
+  const handleMenuOpen = (event, course) => {
+    setAnchorEl(event.currentTarget);
+    setDialogItem(course);
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
   };
   
   // Handle menu close
@@ -362,13 +503,13 @@ const CourseManagement = () => {
   const handleCloseDialog = () => {
     setOpenDialog(false);
   };
-  
-  // Handle dialog confirm
+    // Handle dialog confirm
   const handleConfirmDialog = () => {
     // Handle different actions based on dialogAction
     switch (dialogAction) {
       case 'delete-course':
         console.log('Delete course:', dialogItem);
+<<<<<<< HEAD
         // Remove course from local state
         const updatedCourses = courses.filter(course => course.id !== dialogItem.id);
         setCourses(updatedCourses);
@@ -396,6 +537,20 @@ const CourseManagement = () => {
         }
         
         // Navigate back to course list
+=======
+        // Remove course from state
+        const updatedCourses = courses.filter(course => course.id !== dialogItem.id);
+        setCourses(updatedCourses);
+        
+        // Save updated course list to localStorage
+        try {
+          localStorage.setItem('savedCourses', JSON.stringify(updatedCourses));
+          console.log('Updated courses in localStorage after deletion');
+        } catch (error) {
+          console.error('Error updating courses in localStorage:', error);
+        }
+        
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
         navigate('/instructor/courses');
         break;
       case 'delete-assessment':
@@ -492,8 +647,7 @@ const CourseManagement = () => {
           {courses.map(course => (
             <Grid item xs={12} md={6} lg={4} key={course.id}>
               <Card elevation={3} sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                <CardContent sx={{ flexGrow: 1 }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <CardContent sx={{ flexGrow: 1 }}>                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <Typography variant="h5" component="h2" gutterBottom>
                       {course.title}
                     </Typography>
@@ -505,8 +659,13 @@ const CourseManagement = () => {
                       <MoreVertIcon />
                     </IconButton>
                     <Menu
+<<<<<<< HEAD
                       anchorEl={anchorEl?.element}
                       open={Boolean(anchorEl)}
+=======
+                      anchorEl={anchorEl}
+                      open={Boolean(anchorEl) && dialogItem?.id === course.id}
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
                       onClose={handleMenuClose}
                     >
                       <MenuItem onClick={() => handleOpenDialog('delete-course', anchorEl?.course)}>
@@ -561,8 +720,7 @@ const CourseManagement = () => {
             </Grid>
           ))}
         </Grid>
-        
-        {/* Confirm Delete Dialog */}
+          {/* Confirm Delete Dialog */}
         <Dialog
           open={openDialog && dialogAction === 'delete-course'}
           onClose={handleCloseDialog}
@@ -578,6 +736,7 @@ const CourseManagement = () => {
             <Button onClick={handleConfirmDialog} color="error">Delete</Button>
           </DialogActions>
         </Dialog>
+<<<<<<< HEAD
 
         {/* Course Form Dialog */}
         <Dialog
@@ -638,6 +797,76 @@ const CourseManagement = () => {
           <DialogActions>
             <Button onClick={handleCourseFormClose}>Cancel</Button>
             <Button onClick={handleCourseFormSubmit} color="primary">Create</Button>
+=======
+        
+        {/* Course Creation Dialog */}
+        <Dialog 
+          open={createCourseDialogOpen} 
+          onClose={() => setCreateCourseDialogOpen(false)} 
+          maxWidth="md" 
+          fullWidth
+        >
+          <DialogTitle>Create New Course</DialogTitle>
+          <DialogContent>
+            <Box sx={{ mt: 2 }}>
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={8}>
+                  <TextField
+                    label="Course Title"
+                    fullWidth
+                    required
+                    value={newCourse.title}
+                    onChange={(e) => setNewCourse({...newCourse, title: e.target.value})}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={4}>
+                  <TextField
+                    label="Course Code"
+                    fullWidth
+                    required
+                    value={newCourse.code}
+                    onChange={(e) => setNewCourse({...newCourse, code: e.target.value})}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    label="Department"
+                    fullWidth
+                    value={newCourse.department}
+                    onChange={(e) => setNewCourse({...newCourse, department: e.target.value})}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    label="Term"
+                    fullWidth
+                    value={newCourse.term}
+                    onChange={(e) => setNewCourse({...newCourse, term: e.target.value})}
+                  />
+                </Grid>
+                <Grid item xs={12}>
+                  <TextField
+                    label="Description"
+                    fullWidth
+                    multiline
+                    rows={4}
+                    value={newCourse.description}
+                    onChange={(e) => setNewCourse({...newCourse, description: e.target.value})}
+                  />
+                </Grid>
+              </Grid>
+            </Box>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setCreateCourseDialogOpen(false)}>Cancel</Button>
+            <Button 
+              onClick={handleCreateCourseSubmit} 
+              variant="contained"
+              disabled={!newCourse.title || !newCourse.code}
+            >
+              Create Course
+            </Button>
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
           </DialogActions>
         </Dialog>
       </Container>
@@ -659,12 +888,11 @@ const CourseManagement = () => {
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Typography variant="h4" component="h1">
             {selectedCourse.title}
-          </Typography>
-          <Button
-            variant="outlined"
+          </Typography>          <Button            variant="outlined"
             startIcon={<AutoGraphIcon />}
             component={RouterLink}
             to={`/instructor/curriculum/${selectedCourse.id}`}
+<<<<<<< HEAD
             onClick={() => {
               // Store the course details in localStorage before navigating
               localStorage.setItem('currentCourse', JSON.stringify({
@@ -675,6 +903,9 @@ const CourseManagement = () => {
                 topics: selectedCourse.topics || []
               }));
             }}
+=======
+            state={{ courseDescription: selectedCourse.description, courseTitle: selectedCourse.title }}
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
           >
             Curriculum Mapping
           </Button>

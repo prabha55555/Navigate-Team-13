@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 module.exports = function(req, res, next) {
+<<<<<<< HEAD
   // For testing purposes - bypass authentication with special header
   if (req.header('x-test-mode') === 'true') {
     // Check if this is an instructor route by checking the URL or method
@@ -11,6 +12,16 @@ module.exports = function(req, res, next) {
       id: isInstructorRoute ? 'test-instructor-id' : 'test-student-id',
       role: isInstructorRoute ? 'instructor' : 'student',
       name: isInstructorRoute ? 'Test Instructor' : 'Test Student'
+=======
+  // For development, bypass authentication
+  if (process.env.NODE_ENV === 'development') {
+    // Add a mock user for development
+    req.user = {
+      id: 'mock-user-id',
+      name: 'Test User',
+      email: 'test@example.com',
+      role: 'instructor'
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
     };
     return next();
   }

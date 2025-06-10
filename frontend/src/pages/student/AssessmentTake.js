@@ -178,9 +178,10 @@ const AssessmentTake = () => {
     setConfirmSubmit(false);
   };
   
-  // Handle assessment submission
+  // Handle assessment submission with AI evaluation
   const handleSubmitAssessment = async () => {
     setSubmitting(true);
+<<<<<<< HEAD
     try {
       // Get the authentication token
       const token = localStorage.getItem('token');
@@ -202,6 +203,67 @@ const AssessmentTake = () => {
         headers: {
           'Content-Type': 'application/json',
           'x-auth-token': token
+=======
+    
+    try {
+      // Prepare submission data
+      const submissionData = {
+        assessmentId: assessment.id,
+        answers: answers,
+        timeSpent: assessment.timeLimit * 60 - timeRemaining,
+        completedAt: new Date().toISOString()
+      };
+      
+      console.log('Submitting assessment:', submissionData);
+      
+      // In a real app, this would be an API call to submit the assessment
+      // const response = await fetch('/api/assessment/submit-with-ai-eval', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'Authorization': `Bearer ${currentUser.token}`
+      //   },
+      //   body: JSON.stringify(submissionData)
+      // });
+      // 
+      // const result = await response.json();
+      
+      // For demo, we'll simulate the API response
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      const result = {
+        success: true,
+        submissionId: 'sub-' + Date.now(),
+        evaluationStatus: 'started',
+        message: 'Submission received. AI evaluation in progress.'
+      };
+      
+      // Calculate an estimated score (this would be done on the server in a real app)
+      let score = 0;
+      let maxScore = 0;
+      
+      assessment.questions.forEach(question => {
+        maxScore += question.points;
+        const userAnswer = answers[question.id];
+        
+        if (!userAnswer) return; // Unanswered
+        
+        if (question.type === 'multiple-choice' || question.type === 'true-false') {
+          if (userAnswer === question.correctAnswer) {
+            score += question.points;
+          }
+        } else if (question.type === 'multiple-select') {
+          if (userAnswer.length === question.correctAnswer.length && 
+              userAnswer.every(a => question.correctAnswer.includes(a))) {
+            score += question.points;
+          }
+        } else if (question.type === 'short-answer') {
+          // In a real app, this would be graded by AI or an instructor
+          // For now, we'll give partial credit based on answer length
+          if (userAnswer.length > 10) {
+            score += question.points * 0.8;
+          }
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
         }
       });
 
@@ -212,6 +274,7 @@ const AssessmentTake = () => {
       let maxScore = response.data.maxScore;
       let submissionId = response.data.submissionId;
       
+<<<<<<< HEAD
       // If no score provided (manual grading needed), calculate a tentative score
       if (!score) {
         score = 0;
@@ -245,20 +308,34 @@ const AssessmentTake = () => {
       const isPassed = response.data.isPassed !== undefined ? response.data.isPassed : percentage >= 50;
       
       navigate(`/results/${submissionId || 'temp'}`, { 
+=======
+      // Close confirmation dialog
+      setConfirmSubmit(false);
+      
+      // Navigate to results page with AI evaluation status
+      navigate(`/results/${assessment.id}`, { 
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
         state: { 
+          submissionId: result.submissionId,
+          evaluationStatus: result.evaluationStatus,
           score,
           maxScore,
           percentage,
           isPassed,
           answers,
           assessment,
+<<<<<<< HEAD
           submissionId: submissionId || 'temp',
           message: response.data.message
+=======
+          message: result.message
+>>>>>>> 47dcb750ab6d6b7f1cac7657d9e0177b3632e637
         }
       });
     } catch (error) {
       setError('Failed to submit assessment. Please try again.');
       setSubmitting(false);
+      setConfirmSubmit(false);
     }
   };
   
