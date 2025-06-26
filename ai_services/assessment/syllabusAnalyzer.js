@@ -861,6 +861,7 @@ Question 2: ...
                 });
             }
         }
+
         
         // If we couldn't extract questions, generate fallback ones
         if (questions.length === 0) {
