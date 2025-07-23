@@ -189,11 +189,12 @@ const StudentResults = () => {
 
   const handleStudentSelect = (studentId) => {
     setSelectedStudentId(studentId);
-    
-    // Fetch student details - in a real app, this would be an API call
-    const student = mockStudentResults.find(s => s.id === studentId);
+    // Always use the actual results array for student details
+    const student = results.find(s => s.id === studentId);
     if (student) {
       setStudentDetail(student);
+    } else {
+      setStudentDetail(null);
     }
   };
   
@@ -269,9 +270,7 @@ const StudentResults = () => {
         <Typography variant="h4" component="h1" gutterBottom>
           Student Assessment Results
         </Typography>
-        <Typography variant="subtitle1" color="text.secondary">
-          {assessments.find(a => a.id === selectedAssessment)?.title || 'All Assessments'}
-        </Typography>
+        {/* Removed upcoming assessments section for instructor view */}
       </Box>
       
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
@@ -409,7 +408,7 @@ const StudentResults = () => {
       <TabPanel value={tabValue} index={1}>
         {studentDetail ? (
           <Grid container spacing={3}>
-            <Grid item xs={12}>
+            <Grid item xs={12} md={6}>
               <Paper elevation={3} sx={{ p: 3, borderRadius: 2 }}>
                 <Typography variant="h5" gutterBottom>
                   {studentDetail.name}
@@ -421,7 +420,23 @@ const StudentResults = () => {
                 <Typography variant="h6" gutterBottom>
                   Performance Summary
                 </Typography>
-                {/* Student performance details would go here */}
+                {/* Student summary card */}
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+                  <Paper elevation={1} sx={{ p: 2, borderRadius: 2, bgcolor: 'grey.50' }}>
+                    <Typography variant="subtitle1" fontWeight="bold">
+                      Result: {(() => {
+                        const percent = studentDetail.percentage || Math.round((studentDetail.score / studentDetail.maxScore) * 100);
+                        const passed = studentDetail.isPassed !== undefined
+                          ? studentDetail.isPassed
+                          : percent >= 50;
+                        return passed ? 'Passed' : 'Failed';
+                      })()}
+                    </Typography>
+                    <Typography variant="body2">
+                      Score: {studentDetail.score} / {studentDetail.maxScore} ({studentDetail.percentage || Math.round((studentDetail.score / studentDetail.maxScore) * 100)}%)
+                    </Typography>
+                  </Paper>
+                </Box>
               </Paper>
             </Grid>
           </Grid>

@@ -12,7 +12,7 @@ const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 // Configure axios instance with base URL and default timeout
 const api = axios.create({
   baseURL: API_URL,
-  timeout: 30000 // 30 second timeout
+  timeout: 60000 // 60 second timeout
 });
 
 // Create axios interceptor to add auth token to all requests

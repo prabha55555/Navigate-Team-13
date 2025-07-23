@@ -878,17 +878,72 @@ Question 2: ...
             };
         }
         
-        // Return the assessment with the extracted questions
-        return {
-            title: `${syllabusAnalysis.basicInfo?.courseTitle || 'Course'} Assessment`,
-            description: `${pattern.name || 'Standard'} assessment covering key course topics`,
-            totalPoints: questions.reduce((sum, q) => sum + q.points, 0),
-            timeLimit: preferences.timeLimit || pattern.timeLimit || 60,
-            questions: questions,
-            dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-            generatedAt: new Date().toISOString(),
-            generatedBy: modelName
-        };
+        // Enforce pattern: match question type/count/points to pattern.questionDistribution
+        if (pattern.questionDistribution && Array.isArray(pattern.questionDistribution)) {
+            let enforcedQuestions = [];
+            let used = new Set();
+            let qIndex = 0;
+            for (const dist of pattern.questionDistribution) {
+                let count = dist.count || 0;
+                let type = (dist.type || '').toLowerCase();
+                let pointsEach = dist.pointsEach || 1;
+                // Filter questions of this type
+                let typeQuestions = questions.filter((q, idx) => (q.questionType === type || q.type === type) && !used.has(idx));
+                // If not enough, fill with any remaining of this type
+                for (let i = 0; i < count; i++) {
+                    let q = typeQuestions[i];
+                    if (!q) {
+                        // If not enough, try to find any unused question
+                        q = questions.find((qq, idx) => !used.has(idx) && (qq.questionType === type || qq.type === type));
+                    }
+                    if (!q) {
+                        // If still not enough, create a dummy question
+                        q = {
+                            id: `q${qIndex + 1}`,
+                            question: `Placeholder question for ${type}`,
+                            questionType: type,
+                            options: type === 'multiple-choice' ? ['Option A', 'Option B', 'Option C', 'Option D'] : [],
+                            correctAnswer: type === 'multiple-choice' ? 'Option A' : (type === 'true-false' ? 'True' : ''),
+                            topic: topics[qIndex % topics.length] || 'General',
+                            difficulty: pattern.difficulty || 'Medium',
+                            points: pointsEach,
+                            explanation: `This is a placeholder question for ${type}.`
+                        };
+                    } else {
+                        // Clone and enforce points/type
+                        q = { ...q, questionType: type, points: pointsEach };
+                    }
+                    enforcedQuestions.push(q);
+                    // Mark as used if from original
+                    let origIdx = questions.indexOf(q);
+                    if (origIdx !== -1) used.add(origIdx);
+                    qIndex++;
+                }
+            }
+            // Replace questions with enforced
+            return {
+                title: `${syllabusAnalysis.basicInfo?.courseTitle || 'Course'} Assessment`,
+                description: `${pattern.name || 'Standard'} assessment covering key course topics`,
+                totalPoints: enforcedQuestions.reduce((sum, q) => sum + (q.points || 0), 0),
+                timeLimit: preferences.timeLimit || pattern.timeLimit || 60,
+                questions: enforcedQuestions,
+                dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+                generatedAt: new Date().toISOString(),
+                generatedBy: modelName
+            };
+        } else {
+            // Return as before if no pattern
+            return {
+                title: `${syllabusAnalysis.basicInfo?.courseTitle || 'Course'} Assessment`,
+                description: `${pattern.name || 'Standard'} assessment covering key course topics`,
+                totalPoints: questions.reduce((sum, q) => sum + q.points, 0),
+                timeLimit: preferences.timeLimit || pattern.timeLimit || 60,
+                questions: questions,
+                dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+                generatedAt: new Date().toISOString(),
+                generatedBy: modelName
+            };
+        }
     } catch (error) {
         console.error('Error generating assessment:', error);
         
