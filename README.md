@@ -1,5 +1,7 @@
 # Navigate - AI-Powered Assessment & Adaptive Learning Platform
 
+https://github.com/user-attachments/assets/0da1f349-d2b1-4282-90f7-f40f75e68950
+
 Navigate is a comprehensive educational platform that leverages artificial intelligence to create personalized learning experiences and intelligent assessments. The platform combines advanced AI services with modern web technologies to provide adaptive learning paths, automated assessment generation, and intelligent content analysis.
 
 ## 🌟 Features
