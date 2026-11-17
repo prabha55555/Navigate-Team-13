@@ -1,25 +1,18 @@
-import { Box, CircularProgress } from '@mui/material';
 import React from 'react';
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import LoadingState from '../common/LoadingState';
 
 const ProtectedRoute = () => {
   const { currentUser, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
-    return (
-      <Box
-        display="flex"
-        justifyContent="center"
-        alignItems="center"
-        minHeight="100vh"
-      >
-        <CircularProgress />
-      </Box>
-    );
+    return <LoadingState fullScreen label="Checking your session…" />;
   }
 
-  return currentUser ? <Outlet /> : <Navigate to="/login" />;
+  // Remember where the visitor was headed so Login can send them back afterwards.
+  return currentUser ? <Outlet /> : <Navigate to="/login" replace state={{ from: location }} />;
 };
 
 export default ProtectedRoute;

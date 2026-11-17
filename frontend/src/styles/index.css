@@ -1,109 +1,497 @@
-/* Base styles for the Navigate application */
-* {
+/* ==========================================================================
+   Navigate — "North Star" base styles
+   Tokens mirror src/theme.js so non-MUI markup (SVG, landing art) stays in sync.
+   ========================================================================== */
+
+:root {
+  --nv-ink: #0E1630;
+  --nv-ink-2: #18234A;
+  --nv-ink-3: #243163;
+  --nv-ink-muted: #9AA3C7;
+
+  --nv-primary: #3346E8;
+  --nv-primary-light: #6B7BFF;
+  --nv-primary-dark: #2232B8;
+
+  --nv-saffron: #F2A93B;
+  --nv-saffron-light: #F7C878;
+  --nv-saffron-dark: #C9821A;
+
+  --nv-success: #12A37F;
+  --nv-warning: #E8890C;
+  --nv-error: #E5484D;
+  --nv-info: #3B82F6;
+
+  --nv-canvas: #F6F5F1;
+  --nv-canvas-deep: #EFEDE6;
+  --nv-paper: #FFFFFF;
+  --nv-sunken: #FAF9F6;
+  --nv-border: #E7E5DE;
+  --nv-border-strong: #D9D6CC;
+  --nv-text: #0E1630;
+  --nv-muted: #5B6178;
+
+  --nv-font-display: "Fraunces", "Iowan Old Style", Georgia, "Times New Roman", serif;
+  --nv-font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --nv-radius-sm: 8px;
+  --nv-radius: 14px;
+  --nv-radius-lg: 20px;
+  --nv-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  color-scheme: light;
+}
+
+/* ---------- Base (deliberately light: MUI owns component spacing) ---------- */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 80px;
 }
 
 body {
-  font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+  margin: 0;
+  font-family: var(--nv-font-sans);
+  background-color: var(--nv-canvas);
+  color: var(--nv-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #f5f7fa;
-  color: #333;
+  overflow-x: hidden;
 }
 
-/* Typography */
-h1, h2, h3, h4, h5, h6 {
-  margin-bottom: 1rem;
-  font-weight: 500;
-  line-height: 1.2;
+img,
+video {
+  max-width: 100%;
 }
 
 a {
+  color: var(--nv-primary);
   text-decoration: none;
-  color: #1976d2;
 }
 
-/* Custom scrollbar */
+::selection {
+  background: rgba(51, 70, 232, 0.18);
+}
+
+/* Visible, consistent keyboard focus for anything MUI doesn't style itself */
+:focus-visible {
+  outline: 2px solid var(--nv-primary);
+  outline-offset: 2px;
+}
+
+/* ---------- Scrollbars ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #CFCBC0 transparent;
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #888;
-  border-radius: 4px;
+  background: #D3D0C6;
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: #B9B5A9;
+  background-clip: padding-box;
 }
 
-/* Transition effects */
-.fade-enter {
+/* ---------- Proctored assessment: give the fullscreen container a canvas ---------- */
+#assessment-fullscreen-container:fullscreen {
+  background: var(--nv-canvas);
+  overflow-y: auto;
+  padding: 32px clamp(16px, 4vw, 56px);
+}
+
+#assessment-fullscreen-container::backdrop {
+  background: var(--nv-canvas);
+}
+
+/* ---------- Utilities ---------- */
+.nv-sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.nv-skip-link {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--nv-ink);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.875rem;
+  transform: translateY(-160%);
+}
+
+.nv-skip-link:focus {
+  transform: none;
+}
+
+.nv-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Legacy helpers kept for any page that still references them */
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.text-muted { color: var(--nv-muted); }
+.mb-1 { margin-bottom: 0.5rem; }
+.mb-2 { margin-bottom: 1rem; }
+.mb-3 { margin-bottom: 1.5rem; }
+.mb-4 { margin-bottom: 2rem; }
+.mt-1 { margin-top: 0.5rem; }
+.mt-2 { margin-top: 1rem; }
+.mt-3 { margin-top: 1.5rem; }
+.mt-4 { margin-top: 2rem; }
+
+/* ---------- Ink surfaces & textures ---------- */
+.nv-ink {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--nv-ink);
+  color: #fff;
+}
+
+/* Dotted wayfinding grid, faded toward the edges */
+.nv-dots::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.075) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 70% 35%, #000 10%, transparent 80%);
+  mask-image: radial-gradient(ellipse 80% 70% at 70% 35%, #000 10%, transparent 80%);
+}
+
+/* Topographic contour rings */
+.nv-contours::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: repeating-radial-gradient(
+    circle at 88% 12%,
+    transparent 0 46px,
+    rgba(255, 255, 255, 0.04) 46px 47px
+  );
+  -webkit-mask-image: radial-gradient(circle at 88% 12%, #000 0%, transparent 70%);
+  mask-image: radial-gradient(circle at 88% 12%, #000 0%, transparent 70%);
+}
+
+/* Light-surface dotted texture (canvas sections) */
+.nv-dots-light {
+  background-image: radial-gradient(rgba(14, 22, 48, 0.07) 1px, transparent 1.3px);
+  background-size: 22px 22px;
+}
+
+/* ==========================================================================
+   Learning route (signature visual)
+   ========================================================================== */
+.nv-route {
+  position: relative;
+  width: 100%;
+}
+
+.nv-route__svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.nv-route__node {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.nv-route__dot {
+  position: absolute;
+  left: -8px;
+  top: -8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--nv-ink);
+  border: 2px solid var(--nv-primary-light);
+  box-shadow: 0 0 0 5px rgba(107, 123, 255, 0.14);
+}
+
+.nv-route__dot--done {
+  background: var(--nv-primary-light);
+  border-color: #C7CEFF;
+}
+
+.nv-route__here {
+  position: absolute;
+  left: -11px;
+  top: -11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  border: 5px solid var(--nv-primary);
+  box-shadow: 0 0 0 6px rgba(107, 123, 255, 0.28), 0 0 26px 6px rgba(107, 123, 255, 0.55);
+}
+
+.nv-route__here::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  border: 2px solid rgba(155, 166, 255, 0.7);
   opacity: 0;
 }
 
-.fade-enter-active {
-  opacity: 1;
-  transition: opacity 300ms;
+.nv-route__star {
+  position: absolute;
+  left: -22px;
+  top: -22px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(242, 169, 59, 0.42) 0%, rgba(242, 169, 59, 0) 68%);
 }
 
-.fade-exit {
-  opacity: 1;
+.nv-route__star svg {
+  width: 30px;
+  height: 30px;
+  filter: drop-shadow(0 0 6px rgba(242, 169, 59, 0.75));
 }
 
-.fade-exit-active {
+.nv-route__label {
+  position: absolute;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+
+.nv-route__label-inner {
+  display: block;
+}
+
+.nv-route__label--top { transform: translate(-50%, calc(-100% - 18px)); text-align: center; }
+.nv-route__label--bottom { transform: translate(-50%, 18px); text-align: center; }
+.nv-route__label--right { transform: translate(18px, -50%); }
+.nv-route__label--left { transform: translate(calc(-100% - 18px), -50%); text-align: right; }
+.nv-route__label--bottom-right { transform: translate(14px, 12px); }
+.nv-route__label--top-left { transform: translate(calc(-100% - 12px), calc(-100% - 10px)); text-align: right; }
+
+.nv-route__step {
+  display: block;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nv-ink-muted);
+}
+
+.nv-route__name {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: -0.01em;
+}
+
+.nv-route__caption {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nv-ink-muted);
+}
+
+.nv-route__caption--here {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 999px;
+  background: rgba(107, 123, 255, 0.18);
+  border: 1px solid rgba(107, 123, 255, 0.4);
+  color: #DDE1FF;
+  font-weight: 600;
+}
+
+.nv-route__caption--here::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9BA6FF;
+  box-shadow: 0 0 6px #9BA6FF;
+}
+
+.nv-route--compact .nv-route__name { font-size: 0.8125rem; }
+.nv-route--compact .nv-route__caption:not(.nv-route__caption--here) { display: none; }
+
+@media (max-width: 599.95px) {
+  .nv-route__name { font-size: 0.75rem; }
+  .nv-route__step { display: none; }
+  .nv-route__caption:not(.nv-route__caption--here) { display: none; }
+  .nv-route__caption--here { font-size: 0.6875rem; }
+  .nv-route__dot { left: -6px; top: -6px; width: 12px; height: 12px; box-shadow: 0 0 0 3px rgba(107, 123, 255, 0.14); }
+  .nv-route__here { left: -9px; top: -9px; width: 18px; height: 18px; border-width: 4px; }
+  .nv-route__label--top { transform: translate(-50%, calc(-100% - 12px)); }
+  .nv-route__label--right { transform: translate(12px, -50%); }
+  .nv-route__label--left { transform: translate(calc(-100% - 12px), -50%); }
+}
+
+/* ==========================================================================
+   Small signature details
+   ========================================================================== */
+.nv-live-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--nv-success);
+  flex: none;
+}
+
+.nv-live-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(18, 163, 127, 0.5);
   opacity: 0;
-  transition: opacity 300ms;
 }
 
-/* Utility classes */
-.text-center {
-  text-align: center;
+/* ==========================================================================
+   Motion — only for people who haven't asked for less of it
+   ========================================================================== */
+@keyframes nv-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
 }
 
-.text-right {
-  text-align: right;
+@keyframes nv-pop {
+  from { opacity: 0; transform: scale(0.4); }
+  to { opacity: 1; transform: scale(1); }
 }
 
-.text-muted {
-  color: rgba(0, 0, 0, 0.6);
+@keyframes nv-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-.mb-1 {
-  margin-bottom: 0.5rem;
+@keyframes nv-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-.mb-2 {
-  margin-bottom: 1rem;
+@keyframes nv-pulse {
+  0% { opacity: 0.85; transform: scale(0.55); }
+  80%, 100% { opacity: 0; transform: scale(1.9); }
 }
 
-.mb-3 {
-  margin-bottom: 1.5rem;
+@keyframes nv-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
 }
 
-.mb-4 {
-  margin-bottom: 2rem;
+@keyframes nv-twinkle {
+  0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+  50% { transform: scale(0.86) rotate(12deg); opacity: 0.85; }
 }
 
-.mt-1 {
-  margin-top: 0.5rem;
+@keyframes nv-spin {
+  to { transform: rotate(360deg); }
 }
 
-.mt-2 {
-  margin-top: 1rem;
-}
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 
-.mt-3 {
-  margin-top: 1.5rem;
-}
+  /* Route draws itself, checkpoints pop in behind the pen */
+  .nv-route__draw {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: nv-draw var(--nv-draw-duration, 2.6s) var(--nv-ease) 0.35s forwards;
+  }
 
-.mt-4 {
-  margin-top: 2rem;
+  .nv-route__node > span:first-child {
+    animation: nv-pop 0.5s var(--nv-ease) both;
+    animation-delay: var(--nv-delay, 0s);
+  }
+
+  .nv-route__label-inner {
+    display: block;
+    animation: nv-fade-up 0.6s var(--nv-ease) both;
+    animation-delay: calc(var(--nv-delay, 0s) + 0.12s);
+  }
+
+  .nv-route__here::before {
+    animation: nv-pulse 2.4s ease-out infinite;
+    animation-delay: 3s;
+  }
+
+  .nv-route__star svg {
+    animation: nv-twinkle 4.8s ease-in-out infinite;
+    animation-delay: 3.2s;
+  }
+
+  .nv-live-dot::after {
+    animation: nv-pulse 2s ease-out infinite;
+  }
+
+  .nv-float {
+    animation: nv-float 7s ease-in-out infinite;
+    animation-delay: 1.2s;
+  }
+
+  .nv-rise {
+    animation: nv-fade-up 0.7s var(--nv-ease) both;
+    animation-delay: var(--nv-delay, 0s);
+  }
+
+  .nv-fade-in {
+    animation: nv-fade 0.8s ease both;
+    animation-delay: var(--nv-delay, 0s);
+  }
+
+  /* Route change in the app shell. `backwards` so no transform lingers
+     (a lingering transform would re-anchor position:fixed children). */
+  .nv-page-enter {
+    animation: nv-fade-up 0.32s var(--nv-ease) backwards;
+  }
+
+  .nv-spin {
+    animation: nv-spin 1.6s linear infinite;
+  }
 }

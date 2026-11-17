@@ -1,5 +1,13 @@
 const axios = require('axios');
 require('dotenv').config();
+const geminiModels = require('../models/geminiModels');
+
+// Every AI call is bounded so a slow/unreachable API cannot hang a submission.
+const AI_REQUEST_TIMEOUT_MS = 15000;
+
+// Log axios failures without dumping the request config (it contains the API key).
+const describeError = (error) =>
+  error && error.response ? `${error.message} (status ${error.response.status})` : (error && error.message) || String(error);
 
 /**
  * Plagiarism Detection AI Service
@@ -14,33 +22,83 @@ require('dotenv').config();
 class PlagiarismDetector {
   constructor() {
     this.gemini = axios.create({
-      baseURL: 'https://generativelanguage.googleapis.com/v1/models',
+      baseURL: 'https://generativelanguage.googleapis.com/v1beta/models',
       headers: {
         'Content-Type': 'application/json'
       },
       params: {
         key: process.env.GEMINI_API_KEY
-      }
+      },
+      timeout: AI_REQUEST_TIMEOUT_MS
     });
-    
+
     // For embeddings and advanced analysis
     this.huggingFace = axios.create({
       baseURL: 'https://api-inference.huggingface.co/models',
       headers: {
         'Authorization': `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: AI_REQUEST_TIMEOUT_MS
     });
-    
-    // Model names
-    this.geminiModel = process.env.GEMINI_MODEL || 'gemini-pro';
+
+    // Model names (the Gemini model is chosen per request by geminiModels, which
+    // skips retired models such as the default 'gemini-pro')
+    this.geminiEnabled = Boolean(process.env.GEMINI_API_KEY);
     this.embeddingModel = process.env.EMBEDDING_MODEL || 'sentence-transformers/all-MiniLM-L6-v2';
-    
+
     // Similarity threshold for flagging content (0.0 to 1.0)
     this.similarityThreshold = 0.85;
-    
+
     // Minimum content length to check for AI-generated text
     this.aiDetectionMinLength = 100;
+  }
+
+  /**
+   * POST a generateContent request, moving to the next candidate model when
+   * Gemini reports the model as retired/unknown.
+   * @private
+   */
+  async _geminiGenerate(requestBody) {
+    const body = {
+      ...requestBody,
+      generationConfig: {
+        ...(requestBody.generationConfig || {}),
+        // Thinking models spend part of the output budget on reasoning
+        maxOutputTokens: Math.max(
+          (requestBody.generationConfig && requestBody.generationConfig.maxOutputTokens) || 0,
+          geminiModels.MIN_OUTPUT_TOKENS
+        )
+      }
+    };
+    let lastError;
+    for (const model of geminiModels.candidateModels(process.env.GEMINI_MODEL)) {
+      try {
+        const response = await this.gemini.post(`/${model}:generateContent`, body);
+        const parts = response.data && response.data.candidates && response.data.candidates[0] &&
+          response.data.candidates[0].content && response.data.candidates[0].content.parts;
+        if (!Array.isArray(parts) || parts.length === 0) {
+          throw new Error('Empty response from Gemini');
+        }
+        // Normalise so callers can keep reading parts[0].text
+        const text = parts.filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('');
+        response.data.candidates[0].content.parts = [{ text }];
+        return response;
+      } catch (error) {
+        lastError = error;
+        const status = error.response && error.response.status;
+        const apiMessage = error.response && error.response.data && error.response.data.error && error.response.data.error.message;
+        if (geminiModels.isModelUnavailableError(status, apiMessage)) {
+          geminiModels.markUnavailable(model);
+          continue;
+        }
+        if (geminiModels.isTryNextModelError(status)) {
+          continue; // rate limited / overloaded: try a model with its own quota
+        }
+        throw error;
+      }
+    }
+    throw lastError || new Error('No Gemini model available');
   }
 
   /**
@@ -65,25 +123,38 @@ class PlagiarismDetector {
       crossLanguageMatches: [] // NEW: Matches found across languages
     };
     
-    // Process each answer in the submission
-    for (let i = 0; i < submission.answers.length; i++) {
-      const answer = submission.answers[i];
-      const question = assessment.questions.find(q => q.id === answer.questionId);
-      
+    const questions = (assessment && Array.isArray(assessment.questions)) ? assessment.questions : [];
+
+    // Process each answer in the submission. The independent AI checks for an
+    // answer (and the answers themselves) run concurrently instead of one
+    // network round-trip after another.
+    const analyzeAnswer = async (answer, i) => {
+      const question = questions.find(q => String(q.id) === String(answer.questionId));
+      const questionType = question ? String(question.questionType || question.type || '').toLowerCase() : '';
+
       // Skip non-text answers or very short answers
-      if (!answer.answer || 
-          typeof answer.answer !== 'string' || 
+      if (!answer.answer ||
+          typeof answer.answer !== 'string' ||
           answer.answer.length < 30 ||
-          question.type === 'multiple-choice') {
-        continue;
+          questionType === 'multiple-choice') {
+        return;
       }
-      
-      // Check for similarity with previous submissions
-      const similarityResults = await this._checkForSimilarity(
-        answer.answer,
-        this._getPreviousAnswersForQuestion(previousSubmissions, answer.questionId)
-      );
-      
+
+      const text = answer.answer;
+      const [similarityResults, aiResults, sourceResults, crossLanguageResults] = await Promise.all([
+        // Check for similarity with previous submissions
+        this._checkForSimilarity(
+          text,
+          this._getPreviousAnswersForQuestion(previousSubmissions, answer.questionId)
+        ),
+        // For longer text, also check for AI-generated content
+        text.length >= this.aiDetectionMinLength ? this._checkForAiGeneratedContent(text) : null,
+        // Check for online sources
+        text.length >= 100 ? this._checkForPotentialSources(text) : [],
+        // Check for cross-language plagiarism
+        text.length >= 200 ? this._checkForCrossLanguagePlagiarism(text) : null
+      ]);
+
       // If similarity is above threshold, flag this answer
       if (similarityResults.similarityScore >= this.similarityThreshold) {
         results.isPlagiarismDetected = true;
@@ -95,54 +166,47 @@ class PlagiarismDetector {
           questionIndex: i
         });
       }
-      
-      // For longer text, also check for AI-generated content
-      if (answer.answer.length >= this.aiDetectionMinLength) {
-        const aiResults = await this._checkForAiGeneratedContent(answer.answer);
-        
-        if (aiResults.score >= 0.7) {  // 70% confidence threshold
+
+      if (aiResults) {
+        const aiScore = Number(aiResults.score) || 0;
+        if (aiScore >= 0.7) {  // 70% confidence threshold
           results.aiGeneratedContentDetected = true;
           results.aiGeneratedAnswers.push({
             questionId: answer.questionId,
-            aiScore: aiResults.score,
+            aiScore,
             evidence: aiResults.evidence,
             questionIndex: i
           });
         }
-        
+
         // Update the overall AI score
-        results.aiGeneratedContentScore = Math.max(
-          results.aiGeneratedContentScore,
-          aiResults.score
-        );
+        results.aiGeneratedContentScore = Math.max(results.aiGeneratedContentScore, aiScore);
       }
-      
-      // NEW: Check for online sources
-      if (answer.answer.length >= 100) {
-        const sourceResults = await this._checkForPotentialSources(answer.answer);
-        if (sourceResults.length > 0) {
-          results.potentialSources.push({
-            questionId: answer.questionId,
-            sources: sourceResults,
-            questionIndex: i
-          });
-        }
+
+      if (Array.isArray(sourceResults) && sourceResults.length > 0) {
+        results.potentialSources.push({
+          questionId: answer.questionId,
+          sources: sourceResults,
+          questionIndex: i
+        });
       }
-      
-      // NEW: Check for cross-language plagiarism
-      if (answer.answer.length >= 200) {
-        const crossLanguageResults = await this._checkForCrossLanguagePlagiarism(answer.answer);
-        if (crossLanguageResults.detected) {
-          results.crossLanguageMatches.push({
-            questionId: answer.questionId,
-            originalLanguage: crossLanguageResults.originalLanguage,
-            similarityScore: crossLanguageResults.similarityScore,
-            evidence: crossLanguageResults.evidence,
-            questionIndex: i
-          });
-        }
+
+      if (crossLanguageResults && crossLanguageResults.detected) {
+        results.crossLanguageMatches.push({
+          questionId: answer.questionId,
+          originalLanguage: crossLanguageResults.originalLanguage,
+          similarityScore: crossLanguageResults.similarityScore,
+          evidence: crossLanguageResults.evidence,
+          questionIndex: i
+        });
       }
-    }
+    };
+
+    await Promise.all((submission.answers || []).map((answer, i) =>
+      analyzeAnswer(answer, i).catch(error =>
+        console.error(`Plagiarism analysis failed for question ${answer.questionId}:`, describeError(error))
+      )
+    ));
     
     // Calculate overall similarity if there are flagged answers
     if (results.flaggedAnswers.length > 0) {
@@ -179,7 +243,7 @@ class PlagiarismDetector {
         return await this._embeddingBasedSimilarityCheck(currentAnswer, previousAnswers);
       }
     } catch (error) {
-      console.error('Error in similarity check:', error);
+      console.error('Error in similarity check:', describeError(error));
       return { 
         similarityScore: 0, 
         matchedSubmissionId: null,
@@ -196,8 +260,22 @@ class PlagiarismDetector {
     let highestSimilarity = 0;
     let matchedSubmissionId = null;
     let evidence = null;
-    
-    for (const prev of previousAnswers) {
+
+    // Without a Gemini key, fall back to a local lexical comparison instead of
+    // sending requests that are guaranteed to fail.
+    if (!this.geminiEnabled) {
+      for (const prev of previousAnswers) {
+        const score = this._lexicalSimilarity(currentAnswer, prev.answer);
+        if (score > highestSimilarity) {
+          highestSimilarity = score;
+          matchedSubmissionId = prev.submissionId;
+          evidence = score >= 0.7 ? 'High word overlap with another submission' : null;
+        }
+      }
+      return { similarityScore: highestSimilarity, matchedSubmissionId, evidence };
+    }
+
+    await Promise.all(previousAnswers.map(async (prev) => {
       try {
         const prompt = `
 Compare these two student answers for similarity and potential plagiarism:
@@ -234,10 +312,7 @@ Return your response as a JSON object with this structure:
           }
         };
 
-        const response = await this.gemini.post(
-          `/${this.geminiModel}:generateContent`,
-          requestBody
-        );
+        const response = await this._geminiGenerate(requestBody);
 
         // Parse the response
         const content = response.data.candidates[0].content.parts[0].text;
@@ -245,21 +320,36 @@ Return your response as a JSON object with this structure:
         const jsonEnd = content.lastIndexOf('}') + 1;
         const resultJson = JSON.parse(content.substring(jsonStart, jsonEnd));
         
-        if (resultJson.similarityScore > highestSimilarity) {
-          highestSimilarity = resultJson.similarityScore;
+        const score = Number(resultJson.similarityScore) || 0;
+        if (score > highestSimilarity) {
+          highestSimilarity = score;
           matchedSubmissionId = prev.submissionId;
           evidence = resultJson.evidence;
         }
       } catch (error) {
-        console.error('Error comparing answers:', error);
+        console.error('Error comparing answers:', describeError(error));
       }
-    }
-    
+    }));
+
     return {
       similarityScore: highestSimilarity,
       matchedSubmissionId,
       evidence
     };
+  }
+
+  /**
+   * Dice coefficient over the sets of significant words in two texts (0..1).
+   * @private
+   */
+  _lexicalSimilarity(textA, textB) {
+    const words = (text) => new Set(String(text || '').toLowerCase().split(/\W+/).filter(w => w.length > 3));
+    const a = words(textA);
+    const b = words(textB);
+    if (a.size === 0 || b.size === 0) return 0;
+    let common = 0;
+    a.forEach(w => { if (b.has(w)) common++; });
+    return (2 * common) / (a.size + b.size);
   }
   
   /**
@@ -268,6 +358,9 @@ Return your response as a JSON object with this structure:
    */
   async _embeddingBasedSimilarityCheck(currentAnswer, previousAnswers) {
     try {
+      if (!process.env.HUGGINGFACE_API_KEY) {
+        throw new Error('HUGGINGFACE_API_KEY not configured');
+      }
       // Get embedding for current answer using Hugging Face
       const currentEmbeddingResponse = await this.huggingFace.post(
         `/${this.embeddingModel}`,
@@ -324,8 +417,16 @@ Return your response as a JSON object with this structure:
         evidence: null
       };
     } catch (error) {
-      console.error('Error in embedding-based similarity check:', error);
-      return { similarityScore: 0, matchedSubmissionId: null, evidence: null };
+      console.error('Error in embedding-based similarity check:', describeError(error));
+      // Fall back to a local lexical comparison rather than reporting "no match".
+      let best = { similarityScore: 0, matchedSubmissionId: null, evidence: null };
+      for (const prev of previousAnswers) {
+        const score = this._lexicalSimilarity(currentAnswer, prev.answer);
+        if (score > best.similarityScore) {
+          best = { similarityScore: score, matchedSubmissionId: prev.submissionId, evidence: null };
+        }
+      }
+      return best;
     }
   }
   
@@ -359,6 +460,9 @@ Return your response as a JSON object with this structure:
    * @private
    */
   async _checkForAiGeneratedContent(text) {
+    if (!this.geminiEnabled) {
+      return { score: 0, evidence: null };
+    }
     try {
       const prompt = `
 Analyze this text and determine if it was likely generated by an AI (like ChatGPT, Bard, Claude, etc):
@@ -394,10 +498,7 @@ Return your analysis as a JSON object with:
         }
       };
 
-      const response = await this.gemini.post(
-        `/${this.geminiModel}:generateContent`,
-        requestBody
-      );
+      const response = await this._geminiGenerate(requestBody);
 
       // Parse the response
       const content = response.data.candidates[0].content.parts[0].text;
@@ -412,7 +513,7 @@ Return your analysis as a JSON object with:
         return { score: 0, evidence: null };
       }
     } catch (error) {
-      console.error('Error in AI generation check:', error);
+      console.error('Error in AI generation check:', describeError(error));
       return { score: 0, evidence: null };
     }
   }
@@ -422,6 +523,9 @@ Return your analysis as a JSON object with:
    * @private
    */
   async _checkForPotentialSources(text) {
+    if (!this.geminiEnabled) {
+      return [];
+    }
     try {
       const prompt = `
 Analyze this text and determine if it appears to be copied or closely paraphrased from common online sources:
@@ -462,10 +566,7 @@ If you cannot identify any specific potential sources, return an empty array: []
         }
       };
 
-      const response = await this.gemini.post(
-        `/${this.geminiModel}:generateContent`, 
-        requestBody
-      );
+      const response = await this._geminiGenerate(requestBody);
 
       // Parse the response
       const content = response.data.candidates[0].content.parts[0].text;
@@ -478,7 +579,9 @@ If you cannot identify any specific potential sources, return an empty array: []
           const resultJson = JSON.parse(content.substring(jsonStartIndex, jsonEndIndex));
           
           // Filter to only include sources with medium to high confidence
-          return resultJson.filter(source => source.confidence >= 0.65);
+          return Array.isArray(resultJson)
+            ? resultJson.filter(source => source && source.confidence >= 0.65)
+            : [];
         } else {
           return [];
         }
@@ -487,7 +590,7 @@ If you cannot identify any specific potential sources, return an empty array: []
         return [];
       }
     } catch (error) {
-      console.error('Error in source detection:', error);
+      console.error('Error in source detection:', describeError(error));
       return [];
     }
   }
@@ -497,6 +600,9 @@ If you cannot identify any specific potential sources, return an empty array: []
    * @private
    */
   async _checkForCrossLanguagePlagiarism(text) {
+    if (!this.geminiEnabled) {
+      return { detected: false, similarityScore: 0, originalLanguage: "unknown", evidence: null };
+    }
     try {
       // Analyze the text to determine if it appears to be a translation
       const prompt = `
@@ -535,10 +641,7 @@ Return your analysis as a JSON object:
         }
       };
 
-      const response = await this.gemini.post(
-        `/${this.geminiModel}:generateContent`,
-        requestBody
-      );
+      const response = await this._geminiGenerate(requestBody);
 
       // Parse the response
       const content = response.data.candidates[0].content.parts[0].text;
@@ -557,7 +660,7 @@ Return your analysis as a JSON object:
         return { detected: false, similarityScore: 0, originalLanguage: "unknown", evidence: null };
       }
     } catch (error) {
-      console.error('Error in cross-language plagiarism detection:', error);
+      console.error('Error in cross-language plagiarism detection:', describeError(error));
       return { detected: false, similarityScore: 0, originalLanguage: "unknown", evidence: null };
     }
   }
@@ -576,6 +679,9 @@ Return your analysis as a JSON object:
           educationalGuidance: [],
           resources: []
         };
+      }
+      if (!this.geminiEnabled) {
+        throw new Error('GEMINI_API_KEY not configured');
       }
 
       const prompt = `
@@ -615,10 +721,7 @@ Format your response as a JSON object:
         }
       };
 
-      const response = await this.gemini.post(
-        `/${this.geminiModel}:generateContent`,
-        requestBody
-      );
+      const response = await this._geminiGenerate(requestBody);
 
       // Parse the response
       const content = response.data.candidates[0].content.parts[0].text;
@@ -631,7 +734,7 @@ Format your response as a JSON object:
         throw new Error('Could not parse report response');
       }
     } catch (error) {
-      console.error('Error generating educational report:', error);
+      console.error('Error generating educational report:', describeError(error));
       return {
         summary: "An error occurred while generating the educational report.",
         educationalGuidance: [

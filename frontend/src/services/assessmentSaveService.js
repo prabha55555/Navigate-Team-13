@@ -7,8 +7,6 @@ import axios from 'axios';
  * @returns {Promise<Object>} The response from the backend
  */
 export const saveAssessment = async (assessmentData) => {
-  console.log('=== SAVING ASSESSMENT ===');
-  console.log('Assessment data:', assessmentData);
   
   // Prepare assessment data with proper visibility flags
   const preparedAssessmentData = {
@@ -21,7 +19,6 @@ export const saveAssessment = async (assessmentData) => {
     courseName: assessmentData.courseName || 'Data Structures and Algorithms in Java'
   };
   
-  console.log('Prepared assessment data:', preparedAssessmentData);
   
   // Save to localStorage first
   try {
@@ -42,7 +39,6 @@ export const saveAssessment = async (assessmentData) => {
     }
     
     localStorage.setItem('savedAssessments', JSON.stringify(savedAssessments));
-    console.log('Assessment saved to localStorage');
   } catch (error) {
     console.error('Error saving to localStorage:', error);
   }
@@ -57,7 +53,6 @@ export const saveAssessment = async (assessmentData) => {
       }
     });
     
-    console.log('Assessment saved to backend:', response.data);
     return response.data;
   } catch (error) {
     console.error('Error saving assessment to backend:', error);

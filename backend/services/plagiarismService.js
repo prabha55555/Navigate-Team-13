@@ -43,15 +43,11 @@ exports.checkSubmission = async ({ submissionId, studentId, assessmentId, answer
     // Get previous submissions for this assessment (excluding current student's)
     const previousSubmissions = await getPreviousSubmissions(assessmentId, studentId);
     
-    // Run the main plagiarism detection through our AI service
-    const aiServiceResults = await plagiarismDetector.checkSubmission(
-      submission, 
-      previousSubmissions, 
-      assessmentDetails
-    );
-    
-    // Add external API checks
-    const externalApiResults = await runExternalApiChecks(submission, previousSubmissions);
+    // Run the AI service detection and the external API checks concurrently
+    const [aiServiceResults, externalApiResults] = await Promise.all([
+      plagiarismDetector.checkSubmission(submission, previousSubmissions, assessmentDetails),
+      runExternalApiChecks(submission, previousSubmissions)
+    ]);
     
     // Store the analyzed submission for future comparisons
     storeAnalyzedSubmission(submission, assessmentId);
@@ -268,7 +264,8 @@ async function checkWithTurnitin(text) {
         headers: {
           'Authorization': `Bearer ${turnitinApiKey}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       }
     );
     
@@ -281,7 +278,8 @@ async function checkWithTurnitin(text) {
       matchedSources: response.data.matched_sources || []
     };
   } catch (error) {
-    console.error('Error using Turnitin API:', error);
+    // Log only the message: the axios error object carries the bearer token.
+    console.error('Error using Turnitin API:', error.message);
     return {
       source: 'Turnitin',
       similarityScore: 0,
@@ -306,7 +304,8 @@ async function checkWithGPTZero(text) {
         headers: {
           'Authorization': `Bearer ${gptzeroApiKey}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       }
     );
     
@@ -318,7 +317,7 @@ async function checkWithGPTZero(text) {
       perplexityScore: response.data.perplexity || Math.random() * 50 + 50
     };
   } catch (error) {
-    console.error('Error using GPTZero API:', error);
+    console.error('Error using GPTZero API:', error.message);
     return {
       source: 'GPTZero',
       aiProbability: 0,
@@ -614,6 +613,59 @@ exports.generateStudentReport = async (plagiarismResults) => {
       ]
     };
   }
+};
+
+/**
+ * Run checkSubmission for the text answers of a graded submission without
+ * letting slow AI calls hold the HTTP request open. If the check does not
+ * finish within `timeoutMs`, a "pending" result is returned immediately and
+ * `onLateResult` is called with the real result once it arrives.
+ * @param {Object} params - same params as checkSubmission, with all detailed answers
+ * @param {Object} options - { timeoutMs, onLateResult }
+ * @returns {Promise<Object|null>} plagiarism results, or null when there is nothing to check
+ */
+exports.checkSubmissionBounded = async (params, { timeoutMs = 8000, onLateResult } = {}) => {
+  const textAnswers = (params.answers || []).filter(a =>
+    a.answer &&
+    typeof a.answer === 'string' &&
+    a.answer.trim().length > 30 &&
+    (a.questionType === 'short-answer' || a.questionType === 'essay')
+  );
+
+  if (textAnswers.length === 0) {
+    return null;
+  }
+
+  console.log(`Running plagiarism check on ${textAnswers.length} text answers...`);
+  const check = exports.checkSubmission({ ...params, answers: textAnswers });
+
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+
+  const result = await Promise.race([check, timeout]);
+  clearTimeout(timer);
+
+  if (result) {
+    return result;
+  }
+
+  // Still running: hand the final result to the caller when it arrives.
+  check
+    .then(lateResult => {
+      if (typeof onLateResult === 'function') onLateResult(lateResult);
+    })
+    .catch(error => console.warn('Background plagiarism check failed:', error.message));
+
+  return {
+    isPlagiarismDetected: false,
+    overallSimilarityScore: 0,
+    status: 'pending',
+    detectionMethods: ['Pending'],
+    similarityMatches: [],
+    analyzedAt: new Date().toISOString()
+  };
 };
 
 // Additional helper functions

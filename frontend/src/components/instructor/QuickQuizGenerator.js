@@ -1,19 +1,65 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Form, Button, Row, Col, Alert, Spinner, Modal } from 'react-bootstrap';
-import { toast } from 'react-toastify';
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Checkbox,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  FormGroup,
+  FormLabel,
+  Grid,
+  MenuItem,
+  TextField,
+  Typography
+} from '@mui/material';
 import axios from 'axios';
+import React, { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const QuickQuizGenerator = ({ onNavigateToPatternSelector }) => {
+// Ported from react-bootstrap/react-toastify (neither package is installed, so
+// importing the old component broke the build) to MUI.
+
+const QUESTION_TYPES = [
+  { value: 'multiple-choice', label: 'Multiple Choice' },
+  { value: 'true-false', label: 'True/False' },
+  { value: 'short-answer', label: 'Short Answer' }
+];
+
+const AI_TIMEOUT_MS = 120000;
+
+const errorMessage = (err, fallback) => err?.response?.data?.message || err?.message || fallback;
+
+// Split `total` questions across the selected types so the counts add up exactly
+const distributeQuestions = (total, types) => {
+  const base = Math.floor(total / types.length);
+  const remainder = total % types.length;
+  return types
+    .map((type, index) => ({ type, count: base + (index < remainder ? 1 : 0) }))
+    .filter(item => item.count > 0);
+};
+
+const QuickQuizGenerator = ({ syllabusAnalysis: providedAnalysis = null, onNavigateToPatternSelector }) => {
+  const navigate = useNavigate();
   const [selectedSyllabusId, setSelectedSyllabusId] = useState('');
   const [syllabusOptions, setSyllabusOptions] = useState([]);
+  const [syllabiError, setSyllabiError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [generatedQuiz, setGeneratedQuiz] = useState(null);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [iterationHistory, setIterationHistory] = useState([]);
   const [showIterationModal, setShowIterationModal] = useState(false);
   const [iterationFeedback, setIterationFeedback] = useState('');
   const [timeoutWarning, setTimeoutWarning] = useState(false);
-  
+  const timeoutRef = useRef(null);
+
   // Quiz parameter state
   const [quizParameters, setQuizParameters] = useState({
     questionCount: 10,
@@ -22,176 +68,160 @@ const QuickQuizGenerator = ({ onNavigateToPatternSelector }) => {
     questionTypes: ['multiple-choice', 'true-false', 'short-answer']
   });
 
+  // Clear the "taking longer than expected" timer on unmount
+  useEffect(() => () => clearTimeout(timeoutRef.current), []);
+
   useEffect(() => {
+    // A syllabus analysis passed in by the parent needs no server lookup
+    if (providedAnalysis) return undefined;
+
+    let cancelled = false;
     // Load available syllabi
-    const fetchSyllabi = async () => {
-      try {
-        const response = await axios.get('/api/assessment/syllabus/list');
-        if (response.data.success) {
+    axios.get('/api/assessment/syllabus/list')
+      .then(response => {
+        if (cancelled) return;
+        if (response.data?.success && Array.isArray(response.data.syllabi)) {
           setSyllabusOptions(response.data.syllabi);
+        } else {
+          setSyllabiError('No analyzed syllabi are available yet.');
         }
-      } catch (error) {
-        console.error('Error fetching syllabi:', error);
-        setError('Failed to load syllabi. Please try again later.');
-      }
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.error('Error fetching syllabi:', err);
+        setSyllabiError('No analyzed syllabi are available on the server. Analyze a syllabus in the Assessment Creator first.');
+      });
+
+    return () => {
+      cancelled = true;
     };
+  }, [providedAnalysis]);
 
-    fetchSyllabi();
-  }, []);
-
-  const handleSyllabusChange = (e) => {
-    setSelectedSyllabusId(e.target.value);
+  const handleQuestionTypeToggle = (type) => {
+    setQuizParameters(prev => ({
+      ...prev,
+      questionTypes: prev.questionTypes.includes(type)
+        ? prev.questionTypes.filter(t => t !== type)
+        : [...prev.questionTypes, type]
+    }));
   };
 
   const handleQuizParameterChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    
-    // Handle checkbox for question types
-    if (type === 'checkbox') {
-      const updatedTypes = [...quizParameters.questionTypes];
-      const index = updatedTypes.indexOf(name);
-      
-      if (checked && index === -1) {
-        updatedTypes.push(name);
-      } else if (!checked && index !== -1) {
-        updatedTypes.splice(index, 1);
-      }
-      setQuizParameters({ ...quizParameters, questionTypes: updatedTypes });
-    } else {
-      // Handle other inputs
-      setQuizParameters({ 
-        ...quizParameters, 
-        [name]: type === 'number' ? parseInt(value, 10) : value 
-      });
-    }
+    const { name, value, type } = e.target;
+    setQuizParameters(prev => ({
+      ...prev,
+      [name]: type === 'number' ? value.replace(/[^\d]/g, '') : value
+    }));
   };
 
   const handleGenerateQuiz = async () => {
-    if (!selectedSyllabusId) {
-      toast.warn('Please select a syllabus first');
+    if (loading) return;
+    if (!providedAnalysis && !selectedSyllabusId) {
+      setError('Please select a syllabus first');
       return;
     }
 
     // Ensure at least one question type is selected
     if (quizParameters.questionTypes.length === 0) {
-      toast.warn('Please select at least one question type');
+      setError('Please select at least one question type');
       return;
     }
 
+    const questionCount = Math.min(50, Math.max(1, parseInt(quizParameters.questionCount, 10) || 10));
+    const timeLimit = Math.min(180, Math.max(1, parseInt(quizParameters.timeLimit, 10) || 15));
+
     setLoading(true);
     setError(null);
+    setNotice(null);
     setGeneratedQuiz(null);
     setTimeoutWarning(false);
     // Reset iteration history when generating a new quiz
     setIterationHistory([]);
 
     // Set a timeout warning if generation takes too long
-    const timeoutId = setTimeout(() => {
-      setTimeoutWarning(true);
-    }, 15000); // 15 seconds
+    clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => setTimeoutWarning(true), 15000);
 
     try {
-      // First get the syllabus analysis
-      const syllabusResponse = await axios.get(`/api/assessment/syllabus/${selectedSyllabusId}`);
-      
-      if (!syllabusResponse.data.success || !syllabusResponse.data.syllabusAnalysis) {
-        throw new Error('Failed to retrieve syllabus analysis');
+      let syllabusAnalysis = providedAnalysis;
+      if (!syllabusAnalysis) {
+        // First get the syllabus analysis
+        const syllabusResponse = await axios.get(`/api/assessment/syllabus/${encodeURIComponent(selectedSyllabusId)}`);
+        if (!syllabusResponse.data?.success || !syllabusResponse.data.syllabusAnalysis) {
+          throw new Error('Failed to retrieve syllabus analysis');
+        }
+        syllabusAnalysis = syllabusResponse.data.syllabusAnalysis;
       }
-      
-      const syllabusAnalysis = syllabusResponse.data.syllabusAnalysis;
-      
+
       // Format the pattern based on the quiz parameters for consistent pattern-based generation
+      const distribution = distributeQuestions(questionCount, quizParameters.questionTypes);
       const quizPattern = {
-        name: "Quick Quiz",
-        description: `A ${quizParameters.difficulty} difficulty quiz with ${quizParameters.questionCount} questions`,
-        structure: quizParameters.questionTypes.map(type => {
-          // Calculate count per type - distribute questions evenly among selected types
-          const count = Math.ceil(quizParameters.questionCount / quizParameters.questionTypes.length);
-          return {
-            questionType: formatQuestionType(type),  // Format to match backend expectations
-            count: count,
-            pointsPerQuestion: 1
-          };
-        }),
-        totalPoints: quizParameters.questionCount,
-        estimatedTime: quizParameters.timeLimit,
+        name: 'Quick Quiz',
+        description: `A ${quizParameters.difficulty} difficulty quiz with ${questionCount} questions`,
+        structure: distribution.map(({ type, count }) => ({
+          questionType: QUESTION_TYPES.find(t => t.value === type)?.label || type,
+          count,
+          pointsPerQuestion: 1
+        })),
+        totalPoints: questionCount,
+        estimatedTime: timeLimit,
         difficulty: quizParameters.difficulty,
         isQuickQuiz: true
       };
 
       // Generate quiz using the pattern-based approach
       const response = await axios.post('/api/assessment/generate-questions', {
-        syllabusAnalysis: syllabusAnalysis,
+        syllabusAnalysis,
         pattern: quizPattern
-      });
+      }, { timeout: AI_TIMEOUT_MS });
 
-      clearTimeout(timeoutId);
-      
-      if (response.data.success) {
+      if (response.data?.success && response.data.assessment) {
         setGeneratedQuiz(response.data.assessment);
-        toast.success('Quiz generated successfully!');
+        setNotice('Quiz generated successfully!');
       } else {
-        setError(response.data.message || 'Failed to generate quiz');
-        toast.error('Failed to generate quiz');
+        setError(response.data?.message || 'Failed to generate quiz');
       }
-    } catch (error) {
-      console.error('Error generating quiz:', error);
-      setError(error.response?.data?.message || error.message || 'Failed to generate quiz');
-      toast.error(error.response?.data?.message || 'Failed to generate quiz');
+    } catch (err) {
+      console.error('Error generating quiz:', err);
+      setError(errorMessage(err, 'Failed to generate quiz'));
     } finally {
+      clearTimeout(timeoutRef.current);
+      setTimeoutWarning(false);
       setLoading(false);
-      clearTimeout(timeoutId);
     }
-  };
-
-  // Helper function to format question type
-  const formatQuestionType = (type) => {
-    switch(type) {
-      case 'multiple-choice': return 'Multiple Choice';
-      case 'true-false': return 'True/False';
-      case 'short-answer': return 'Short Answer';
-      default: return type.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-    }
-  };
-
-  const handleIterateQuizModal = () => {
-    setShowIterationModal(true);
-  };
-
-  const handleIterationFeedbackChange = (e) => {
-    setIterationFeedback(e.target.value);
   };
 
   const handleIterateQuiz = async () => {
+    if (loading) return;
     if (!iterationFeedback.trim()) {
-      toast.warn('Please provide some feedback for improvement');
+      setError('Please provide some feedback for improvement');
       return;
     }
-    
+
     setLoading(true);
-    
+    setError(null);
+
     try {
-      // Add current quiz to history before iteration
-      setIterationHistory(prev => [...prev, {...generatedQuiz}]);
-      
       const response = await axios.post('/api/assessment/iterate-quiz', {
-        syllabusId: selectedSyllabusId,
+        syllabusId: selectedSyllabusId || null,
         currentQuiz: generatedQuiz,
         feedback: iterationFeedback,
         parameters: quizParameters
-      });
-      
-      if (response.data.success) {
+      }, { timeout: AI_TIMEOUT_MS });
+
+      if (response.data?.success && response.data.iteratedQuiz) {
+        // Keep the previous version so it can be restored with Undo
+        setIterationHistory(prev => [...prev, generatedQuiz]);
         setGeneratedQuiz(response.data.iteratedQuiz);
         setShowIterationModal(false);
         setIterationFeedback('');
-        toast.success('Quiz improved successfully!');
+        setNotice('Quiz improved successfully!');
       } else {
-        toast.error('Failed to improve quiz. Please try again.');
+        setError('Failed to improve quiz. Please try again.');
       }
-    } catch (error) {
-      console.error('Error iterating quiz:', error);
-      toast.error('Failed to improve quiz. Please try again.');
+    } catch (err) {
+      console.error('Error iterating quiz:', err);
+      setError(errorMessage(err, 'Failed to improve quiz. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -199,129 +229,184 @@ const QuickQuizGenerator = ({ onNavigateToPatternSelector }) => {
 
   const handleUndoIteration = () => {
     if (iterationHistory.length === 0) {
-      toast.info('No previous versions available');
+      setNotice('No previous versions available');
       return;
     }
-    
-    // Get the last quiz from history
-    const previousQuiz = iterationHistory[iterationHistory.length - 1];
-    
-    // Remove it from history
+
+    // Restore the last quiz from history
+    setGeneratedQuiz(iterationHistory[iterationHistory.length - 1]);
     setIterationHistory(prev => prev.slice(0, -1));
-    
-    // Set it as the current quiz
-    setGeneratedQuiz(previousQuiz);
-    toast.info('Reverted to previous version');
+    setNotice('Reverted to previous version');
+  };
+
+  // Hand the quiz to the Assessment Creator (it reads location.state.quiz)
+  const handleUseQuiz = () => {
+    navigate('/instructor/assessment', {
+      state: { quiz: generatedQuiz, syllabusId: selectedSyllabusId || null }
+    });
   };
 
   return (
-    <div>
-      <h2>Quick Quiz Generator</h2>
-      <Form>
-        <Form.Group>
-          <Form.Label>Select Syllabus</Form.Label>
-          <Form.Control as="select" value={selectedSyllabusId} onChange={handleSyllabusChange}>
-            <option value="">-- Select a syllabus --</option>
-            {syllabusOptions.map(syllabus => (
-              <option key={syllabus.id} value={syllabus.id}>
-                {syllabus.name}
-              </option>
-            ))}
-          </Form.Control>
-        </Form.Group>
-        <Form.Group>
-          <Form.Label>Number of Questions</Form.Label>
-          <Form.Control 
-            type="number" 
-            name="questionCount" 
-            value={quizParameters.questionCount} 
-            onChange={handleQuizParameterChange} 
-          />
-        </Form.Group>
-        <Form.Group>
-          <Form.Label>Difficulty</Form.Label>
-          <Form.Control 
-            as="select" 
-            name="difficulty" 
-            value={quizParameters.difficulty} 
+    <Box>
+      <Typography variant="h5" component="h2" gutterBottom>
+        Quick Quiz Generator
+      </Typography>
+
+      <Grid container spacing={2}>
+        {!providedAnalysis && (
+          <Grid item xs={12}>
+            <TextField
+              select
+              fullWidth
+              label="Select Syllabus"
+              value={selectedSyllabusId}
+              onChange={(e) => setSelectedSyllabusId(e.target.value)}
+              disabled={loading || syllabusOptions.length === 0}
+              helperText={syllabiError || ' '}
+              error={Boolean(syllabiError)}
+            >
+              <MenuItem value="">-- Select a syllabus --</MenuItem>
+              {syllabusOptions.map(syllabus => (
+                <MenuItem key={syllabus.id} value={syllabus.id}>
+                  {syllabus.name || [syllabus.courseCode, syllabus.courseTitle].filter(Boolean).join(' - ') || syllabus.id}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Grid>
+        )}
+        <Grid item xs={12} sm={4}>
+          <TextField
+            fullWidth
+            type="number"
+            name="questionCount"
+            label="Number of Questions"
+            value={quizParameters.questionCount}
             onChange={handleQuizParameterChange}
-          >
-            <option value="easy">Easy</option>
-            <option value="medium">Medium</option>
-            <option value="hard">Hard</option>
-          </Form.Control>
-        </Form.Group>
-        <Form.Group>
-          <Form.Label>Time Limit (minutes)</Form.Label>
-          <Form.Control 
-            type="number" 
-            name="timeLimit" 
-            value={quizParameters.timeLimit} 
-            onChange={handleQuizParameterChange} 
+            inputProps={{ min: 1, max: 50 }}
+            disabled={loading}
           />
-        </Form.Group>
-        <Form.Group>
-          <Form.Label>Question Types</Form.Label>
-          <div>
-            <Form.Check 
-              type="checkbox" 
-              label="Multiple Choice" 
-              name="multiple-choice" 
-              checked={quizParameters.questionTypes.includes('multiple-choice')} 
-              onChange={handleQuizParameterChange} 
-            />
-            <Form.Check 
-              type="checkbox" 
-              label="True/False" 
-              name="true-false" 
-              checked={quizParameters.questionTypes.includes('true-false')} 
-              onChange={handleQuizParameterChange} 
-            />
-            <Form.Check 
-              type="checkbox" 
-              label="Short Answer" 
-              name="short-answer" 
-              checked={quizParameters.questionTypes.includes('short-answer')} 
-              onChange={handleQuizParameterChange} 
-            />
-          </div>
-        </Form.Group>
-        <Button onClick={handleGenerateQuiz} disabled={loading}>
-          {loading ? 'Generating...' : 'Generate Quiz'}
-        </Button>
-      </Form>
-      {timeoutWarning && <Alert variant="warning">Quiz generation is taking longer than expected...</Alert>}
-      {error && <Alert variant="danger">{error}</Alert>}
+        </Grid>
+        <Grid item xs={12} sm={4}>
+          <TextField
+            select
+            fullWidth
+            name="difficulty"
+            label="Difficulty"
+            value={quizParameters.difficulty}
+            onChange={handleQuizParameterChange}
+            disabled={loading}
+          >
+            <MenuItem value="easy">Easy</MenuItem>
+            <MenuItem value="medium">Medium</MenuItem>
+            <MenuItem value="hard">Hard</MenuItem>
+          </TextField>
+        </Grid>
+        <Grid item xs={12} sm={4}>
+          <TextField
+            fullWidth
+            type="number"
+            name="timeLimit"
+            label="Time Limit (minutes)"
+            value={quizParameters.timeLimit}
+            onChange={handleQuizParameterChange}
+            inputProps={{ min: 1, max: 180 }}
+            disabled={loading}
+          />
+        </Grid>
+        <Grid item xs={12}>
+          <FormLabel component="legend">Question Types</FormLabel>
+          <FormGroup row>
+            {QUESTION_TYPES.map(type => (
+              <FormControlLabel
+                key={type.value}
+                control={
+                  <Checkbox
+                    checked={quizParameters.questionTypes.includes(type.value)}
+                    onChange={() => handleQuestionTypeToggle(type.value)}
+                    disabled={loading}
+                  />
+                }
+                label={type.label}
+              />
+            ))}
+          </FormGroup>
+        </Grid>
+        <Grid item xs={12}>
+          <Button
+            variant="contained"
+            onClick={handleGenerateQuiz}
+            disabled={loading}
+            startIcon={loading ? <CircularProgress size={20} /> : null}
+          >
+            {loading ? 'Generating...' : 'Generate Quiz'}
+          </Button>
+        </Grid>
+      </Grid>
+
+      {timeoutWarning && <Alert severity="warning" sx={{ mt: 2 }}>Quiz generation is taking longer than expected...</Alert>}
+      {error && <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert severity="info" sx={{ mt: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>}
+
       {generatedQuiz && (
-        <Card>
-          <Card.Body>
-            <h5>{generatedQuiz.title}</h5>
-            <p>{generatedQuiz.description}</p>
-            <Button onClick={handleIterateQuizModal}>Improve Quiz</Button>
-            <Button onClick={handleUndoIteration}>Undo</Button>
-          </Card.Body>
+        <Card sx={{ mt: 3 }}>
+          <CardContent>
+            <Typography variant="h6">{generatedQuiz.title}</Typography>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              {generatedQuiz.description}
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
+              <Chip size="small" label={`Questions: ${generatedQuiz.questions?.length || 0}`} />
+              {generatedQuiz.timeLimit != null && <Chip size="small" label={`Time: ${generatedQuiz.timeLimit} min`} />}
+              {generatedQuiz.totalPoints != null && <Chip size="small" label={`Points: ${generatedQuiz.totalPoints}`} />}
+            </Box>
+            {(generatedQuiz.questions || []).map((question, index) => (
+              <Typography key={question.id || index} variant="body2" sx={{ mb: 0.5 }}>
+                {index + 1}. {question.question}
+              </Typography>
+            ))}
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mt: 2 }}>
+              <Button variant="contained" onClick={handleUseQuiz} disabled={loading}>
+                Use in Assessment Creator
+              </Button>
+              <Button variant="outlined" onClick={() => setShowIterationModal(true)} disabled={loading}>
+                Improve Quiz
+              </Button>
+              <Button variant="outlined" onClick={handleUndoIteration} disabled={loading || iterationHistory.length === 0}>
+                Undo
+              </Button>
+              {onNavigateToPatternSelector && (
+                <Button onClick={onNavigateToPatternSelector} disabled={loading}>
+                  Use a Pattern Instead
+                </Button>
+              )}
+            </Box>
+          </CardContent>
         </Card>
       )}
-      <Modal show={showIterationModal} onHide={() => setShowIterationModal(false)}>
-        <Modal.Header closeButton>
-          <Modal.Title>Improve Quiz</Modal.Title>
-        </Modal.Header>
-        <Modal.Body>
-          <Form.Group>
-            <Form.Label>Feedback</Form.Label>
-            <Form.Control 
-              as="textarea" 
-              value={iterationFeedback} 
-              onChange={handleIterationFeedbackChange} 
-            />
-          </Form.Group>
-        </Modal.Body>
-        <Modal.Footer>
-          <Button onClick={() => setShowIterationModal(false)}>Cancel</Button>
-          <Button onClick={handleIterateQuiz}>Submit</Button>
-        </Modal.Footer>
-      </Modal>
-    </div>
+
+      <Dialog open={showIterationModal} onClose={() => !loading && setShowIterationModal(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Improve Quiz</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            multiline
+            minRows={3}
+            margin="dense"
+            label="Feedback"
+            value={iterationFeedback}
+            onChange={(e) => setIterationFeedback(e.target.value)}
+            disabled={loading}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowIterationModal(false)} disabled={loading}>Cancel</Button>
+          <Button variant="contained" onClick={handleIterateQuiz} disabled={loading || !iterationFeedback.trim()}>
+            {loading ? 'Submitting...' : 'Submit'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
   );
 };
 

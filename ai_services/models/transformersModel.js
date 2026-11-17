@@ -3,9 +3,49 @@ require('dotenv').config();
 
 // Initialize Gemini API configuration
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta';
-// Updated model names to match currently available models
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+// Model selection (configured model first, then fallbacks when Google reports
+// a model as retired). Callers still pass stale names such as 'gemini-pro' or
+// 'gemini-1.5-flash', and the frontend can send non-Gemini names like 'gpt2'.
+const geminiModels = require('./geminiModels');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Requests are bounded so a slow API cannot hold an HTTP request open for minutes.
+const GEMINI_TIMEOUT_MS = 25000;
+const HUGGINGFACE_TIMEOUT_MS = 15000;
+
+/**
+ * The first model that will be tried for a request (used for cache keys/logs).
+ */
+function resolveModelName(requested) {
+  return geminiModels.candidateModels(requested)[0];
+}
+
+// Log axios failures without dumping the request config (it contains the API key).
+const describeError = (error) =>
+  error && error.response ? `${error.message} (status ${error.response.status})` : (error && error.message) || String(error);
+
+// Small in-memory cache for deterministic (low temperature) prompts such as
+// syllabus extraction, so re-analysing the same syllabus is instant.
+const RESPONSE_CACHE_LIMIT = 100;
+const RESPONSE_CACHE_TTL_MS = 30 * 60 * 1000;
+const responseCache = new Map();
+
+function getCachedResponse(key) {
+  const entry = responseCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > RESPONSE_CACHE_TTL_MS) {
+    responseCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function setCachedResponse(key, value) {
+  if (responseCache.size >= RESPONSE_CACHE_LIMIT) {
+    responseCache.delete(responseCache.keys().next().value);
+  }
+  responseCache.set(key, { value, at: Date.now() });
+}
 
 // Initialize Hugging Face fallback model configuration
 const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models';
@@ -34,9 +74,6 @@ async function generateText(prompt, options = {}) {
       return generateWithHuggingFaceFallback(prompt, options);
     }
 
-    const modelName = options.modelName || GEMINI_MODEL;
-    console.log(`Using model: ${modelName}`);
-    
     // Prepare request to Gemini API
     const requestBody = {
       contents: [
@@ -48,52 +85,77 @@ async function generateText(prompt, options = {}) {
       generationConfig: {
         temperature: options.temperature || DEFAULT_PARAMS.temperature,
         topP: options.topP || DEFAULT_PARAMS.top_p,
-        maxOutputTokens: options.maxTokens || DEFAULT_PARAMS.max_length,
+        // Thinking models use part of this budget for reasoning
+        maxOutputTokens: Math.max(options.maxTokens || DEFAULT_PARAMS.max_length, geminiModels.MIN_OUTPUT_TOKENS),
         topK: options.topK || 40
       }
     };
 
-    // Log the request URL for debugging
-    const requestUrl = `${GEMINI_API_URL}/models/${modelName}:generateContent`;
-    console.log(`Making request to Gemini API: ${requestUrl}`);
+    const models = geminiModels.candidateModels(options.modelName);
+    for (const modelName of models) {
+      const requestUrl = `${GEMINI_API_URL}/models/${modelName}:generateContent`;
+      console.log(`Making request to Gemini API: ${requestUrl}`);
 
-    // Make request to Gemini API
-    const response = await axios.post(
-      requestUrl,
-      requestBody,
-      {
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        params: {
-          key: GEMINI_API_KEY
-        },
-        timeout: options.timeout || 60000 // Default 60 second timeout
+      let response;
+      try {
+        response = await axios.post(
+          requestUrl,
+          requestBody,
+          {
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            params: {
+              key: GEMINI_API_KEY
+            },
+            timeout: options.timeout || GEMINI_TIMEOUT_MS
+          }
+        );
+      } catch (error) {
+        const status = error.response && error.response.status;
+        const apiMessage = error.response && error.response.data && error.response.data.error && error.response.data.error.message;
+        if (geminiModels.isModelUnavailableError(status, apiMessage)) {
+          // Retired/unknown model: try the next candidate
+          geminiModels.markUnavailable(modelName);
+          continue;
+        }
+        if (geminiModels.isTryNextModelError(status)) {
+          // Rate limited / overloaded: another model has its own quota
+          console.warn(`Gemini model ${modelName} returned ${status}; trying next model`);
+          continue;
+        }
+        throw error;
       }
-    );
 
-    // Log successful API call for debugging
-    console.log(`Successfully called Gemini API with model: ${modelName}`);
+      // Log successful API call for debugging
+      console.log(`Successfully called Gemini API with model: ${modelName}`);
 
-    // Extract and return text from Gemini response
-    if (response.data && 
-        response.data.candidates && 
-        response.data.candidates[0] && 
+      // Extract and return text from Gemini response (join all text parts)
+      const parts = response.data &&
+        response.data.candidates &&
+        response.data.candidates[0] &&
         response.data.candidates[0].content &&
-        response.data.candidates[0].content.parts &&
-        response.data.candidates[0].content.parts[0]) {
-      return response.data.candidates[0].content.parts[0].text;
-    } else {
-      console.error('Unexpected Gemini API response structure:', JSON.stringify(response.data));
+        response.data.candidates[0].content.parts;
+      const text = Array.isArray(parts)
+        ? parts.filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('')
+        : '';
+      if (text) {
+        if (options.meta) options.meta.source = 'gemini';
+        return text;
+      }
+      console.error('Unexpected Gemini API response structure:', JSON.stringify(response.data).substring(0, 500));
       return generateWithHuggingFaceFallback(prompt, options);
     }
+
+    console.error('No available Gemini model could serve the request');
+    return generateWithHuggingFaceFallback(prompt, options);
   } catch (error) {
-    console.error('Error generating text with Gemini API:', error);
+    // Do not log the raw axios error: its config contains the API key.
+    console.error('Error generating text with Gemini API:', describeError(error));
     if (error.response) {
-      console.error('Response error data:', error.response.data);
-      console.error('Response error status:', error.response.status);
+      console.error('Response error data:', JSON.stringify(error.response.data).substring(0, 500));
     }
-    
+
     // Use Hugging Face fallback model when Gemini API fails
     console.log('Gemini API call failed, using Hugging Face fallback model');
     return generateWithHuggingFaceFallback(prompt, options);
@@ -127,7 +189,7 @@ async function generateWithHuggingFaceFallback(prompt, options = {}) {
           'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        timeout: options.timeout || 30000 // 30 second timeout
+        timeout: HUGGINGFACE_TIMEOUT_MS
       }
     );
     
@@ -143,11 +205,8 @@ async function generateWithHuggingFaceFallback(prompt, options = {}) {
       return getDefaultResponse(prompt);
     }
   } catch (error) {
-    console.error('Error generating text with Hugging Face fallback model:', error);
-    if (error.response) {
-      console.error('Response error data:', error.response.data);
-      console.error('Response error status:', error.response.status);
-    }
+    // Do not log the raw axios error: its headers contain the bearer token.
+    console.error('Error generating text with Hugging Face fallback model:', describeError(error));
     
     return getDefaultResponse(prompt);
   }
@@ -284,17 +343,37 @@ async function createChatCompletion(systemPrompt, userPrompt, options = {}) {
   try {
     // Build a comprehensive prompt combining system and user messages
     const combinedPrompt = `${systemPrompt}\n\n${userPrompt}`;
+    const temperature = options.temperature || 0.7;
+    const modelName = resolveModelName(options.modelName);
+
+    // Deterministic extraction prompts are cached; creative ones (quizzes) are not.
+    const cacheable = temperature <= 0.3;
+    const cacheKey = cacheable ? `${modelName}|${temperature}|${options.maxTokens || 1000}|${combinedPrompt}` : null;
+    if (cacheable) {
+      const cached = getCachedResponse(cacheKey);
+      if (cached !== undefined) {
+        console.log('Using cached model response');
+        return cached;
+      }
+    }
 
     // Generate text using the underlying generateText function
+    const meta = {};
     const result = await generateText(combinedPrompt, {
       maxTokens: options.maxTokens || 1000,
-      temperature: options.temperature || 0.7,
+      temperature,
       topP: options.topP || 0.9,
       repetitionPenalty: options.repetition_penalty || 1.2,
       doSample: true,
-      modelName: options.modelName || GEMINI_MODEL
+      modelName,
+      meta
     });
-    
+
+    // Only cache real Gemini output, never a fallback/default response.
+    if (cacheable && meta.source === 'gemini' && typeof result === 'string' && result) {
+      setCachedResponse(cacheKey, result);
+    }
+
     return result;
   } catch (error) {
     console.error('Error in createChatCompletion:', error);

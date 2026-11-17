@@ -10,6 +10,10 @@ import {
     Chip,
     CircularProgress,
     Container,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogTitle,
     Divider,
     FormControl,
     FormControlLabel,
@@ -38,10 +42,56 @@ import {
     TextField,
     Typography
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+import React, { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import SyllabusUpload from '../../components/instructor/SyllabusUpload';
 import { saveAssessment } from '../../services/assessmentSaveService';
+import {
+    findInstructorAssessment,
+    loadInstructorCourses,
+    normalizeQuestionType,
+    questionTypeLabel
+} from './instructorData';
+import { useNotify } from '../../contexts/NotificationContext';
+
+const EDITABLE_QUESTION_TYPES = ['Multiple Choice', 'True/False', 'Short Answer', 'Essay', 'Programming'];
+const OPTION_QUESTION_TYPES = ['Multiple Choice', 'True/False'];
+
+// <input type="datetime-local"> needs "YYYY-MM-DDTHH:mm" in local time
+const toDateTimeLocal = (value) => {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+// Questions are edited with display labels ('Multiple Choice', ...) in this page
+const toEditorQuestion = (q, index, idPrefix) => {
+  const questionType = questionTypeLabel(q.questionType || q.type);
+  return {
+    ...q,
+    id: q.id || `${idPrefix}-${index + 1}`,
+    question: q.question || q.text || '',
+    questionType,
+    options: Array.isArray(q.options) && q.options.length
+      ? q.options
+      : (questionType === 'True/False' ? ['True', 'False'] : []),
+    // `??` not `||`: a boolean false key is a real answer, not a missing one.
+    correctAnswer: (() => {
+      const key = q.groundTruth ?? q.correctAnswer ?? '';
+      return typeof key === 'boolean' ? (key ? 'True' : 'False') : key;
+    })(),
+    topic: q.topic || 'General',
+    difficulty: q.difficulty || 'Medium',
+    points: Number(q.points) || 1,
+    bloomLevel: q.bloomLevel || 'Remember'
+  };
+};
+
+const pointsOf = (question) => Number(question.points) || 0;
 
 // Mock data for patterns generated from syllabus analysis
 const mockPatterns = [
@@ -180,7 +230,16 @@ const mockGeneratedQuestions = [
   }
 ];
 
+// Remount the form whenever the edited assessment changes (e.g. sidebar
+// "Assessment Creator" from /instructor/assessment/4 -> /instructor/assessment),
+// so no state from the previous assessment leaks into the new one.
 const AssessmentCreation = () => {
+  const { assessmentId } = useParams();
+  return <AssessmentCreationForm key={assessmentId || 'new'} />;
+};
+
+const AssessmentCreationForm = () => {
+  const notify = useNotify();
   const { assessmentId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -189,7 +248,7 @@ const AssessmentCreation = () => {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState(0);
-  
+
   // Assessment data
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -202,203 +261,144 @@ const AssessmentCreation = () => {
   const [showAnswers, setShowAnswers] = useState(false);
   const [assignToAllStudents, setAssignToAllStudents] = useState(false);
   const [syllabusAnalysis, setSyllabusAnalysis] = useState(null);
-    // Mock course data
-  const courses = [
-    { id: '1', title: 'Data Structures and Algorithms in Java' },
-    { id: '2', title: 'Advanced Java Programming' },
-    { id: '3', title: 'Java Web Development' }
-  ];
-  
+  const [syllabusTitle, setSyllabusTitle] = useState('');
+  const [editingQuestion, setEditingQuestion] = useState(null);
+  // Same course list as Course Management (demo courses + locally created ones)
+  const [courses] = useState(() => loadInstructorCourses().map(c => ({ id: c.id, title: c.title })));
+  // Stable local id so retrying a failed save does not create duplicates
+  const draftIdRef = useRef(assessmentId || `assessment-${Date.now()}`);
+
   // Load assessment data if editing existing assessment or coming from quiz generator
   useEffect(() => {
+    const quizData = location.state?.quiz;
+
     // Check if we have quiz data from the quiz generator
-    if (location?.state?.quiz) {
-      const quizData = location.state.quiz;
-      console.log('Received quiz data:', quizData);
-      
+    if (quizData) {
       // Set quiz data into our assessment
       setTitle(quizData.title || 'Quick Knowledge Check');
       setDescription(quizData.description || 'Auto-generated quiz based on syllabus analysis');
       setTimeLimit(quizData.timeLimit || 15);
-      
+
       // Transform quiz questions to match our format
-      if (quizData.questions && Array.isArray(quizData.questions)) {
-        const formattedQuestions = quizData.questions.map((q, index) => ({
-          id: `quiz-${index + 1}`,
-          question: q.question,
-          questionType: q.questionType,
-          options: q.options || [],
-          correctAnswer: q.groundTruth || q.correctAnswer,
-          topic: q.topic || 'General',
-          difficulty: q.difficulty || 'Medium',
-          points: q.points || 1,
-          bloomLevel: q.bloomLevel || 'Knowledge',
-          rubric: q.rubric || {
-            accuracy: { weight: 0.6, criteria: "Factual correctness" },
-            conceptualUnderstanding: { weight: 0.3, criteria: "Understanding of concept" },
-            presentation: { weight: 0.1, criteria: "Clarity" }
-          },
-          relatedConcepts: q.relatedConcepts || []
-        }));
-        
-        setQuestions(formattedQuestions);
-        
-        // Move to question customization step
-        setActiveStep(2);
+      if (Array.isArray(quizData.questions)) {
+        setQuestions(quizData.questions.map((q, index) => toEditorQuestion({ ...q, id: undefined }, index, 'quiz')));
       }
-      
-      // If we have a syllabusId, set that too
-      if (location.state.syllabusId) {
-        // Fetch the syllabus analysis data for the sidebar display
-        // This would be an API call in a real app
-        console.log('Fetching syllabus data for ID:', location.state.syllabusId);
-      }
+      // Move to question customization step
+      setActiveStep(2);
+      return;
     }
-    // Original code for loading existing assessment data
-    else if (assessmentId) {
-      setIsEditing(true);
-      // Simulate loading assessment data from API
-      setLoading(true);
-      setTimeout(() => {
-        // Mock data for an existing assessment        setTitle('Java Data Structures Assessment');
-        setDescription('Comprehensive evaluation of Java collections, data structures implementation, and algorithms');
-        setCourseId('1');
-        setDueDate('2025-11-15T23:59');
-        setTimeLimit(90);
-        setRandomizeQuestions(true);
-        setShowAnswers(false);
-        setQuestions(mockGeneratedQuestions);
-        setSelectedPattern(mockPatterns[0]);
-        setLoading(false);
-      }, 1000);
+
+    if (!assessmentId) return;
+
+    // Edit mode. There is no backend endpoint that returns an instructor's
+    // assessment (with answers), so load the locally saved copy.
+    setIsEditing(true);
+    const { assessment, isFullRecord } = findInstructorAssessment(assessmentId);
+
+    if (assessment && isFullRecord) {
+      setTitle(assessment.title || '');
+      setDescription(assessment.description || '');
+      setCourseId(assessment.courseId || '');
+      setDueDate(toDateTimeLocal(assessment.dueDate));
+      setTimeLimit(assessment.timeLimit ?? 60);
+      setRandomizeQuestions(!!assessment.randomizeQuestions);
+      setShowAnswers(assessment.showAnswers ?? !!assessment.visibility?.studentsCanSeeAnswers);
+      setAssignToAllStudents(!!assessment.assignToAllStudents);
+      setSyllabusTitle(assessment.syllabusTitle || '');
+      setQuestions((assessment.questions || []).map((q, index) => toEditorQuestion(q, index, 'q')));
+      setSelectedPattern(assessment.pattern || null);
+    } else {
+      // Demo assessment (or unknown id): show sample questions so it can be edited and saved
+      setTitle(assessment?.title || 'Java Data Structures Assessment');
+      setDescription('Comprehensive evaluation of Java collections, data structures implementation, and algorithms');
+      setCourseId(assessment?.courseId || '1');
+      setDueDate(toDateTimeLocal(assessment?.dueDate ? `${assessment.dueDate}T23:59` : '2025-11-15T23:59'));
+      setTimeLimit(90);
+      setRandomizeQuestions(true);
+      setShowAnswers(false);
+      setAssignToAllStudents(!!assessment?.assignToAllStudents);
+      setSyllabusTitle(assessment?.syllabusTitle || '');
+      setQuestions(mockGeneratedQuestions.map((q, index) => toEditorQuestion(q, index, 'q')));
+      setSelectedPattern(mockPatterns[0]);
     }
-  }, [assessmentId, location]);
-  
+    // Go straight to the question editor instead of the syllabus upload step
+    setActiveStep(2);
+  }, [assessmentId, location.state]);
+
   // Handle syllabus analysis
   const handleSyllabusAnalysisComplete = (analysisData) => {
     if (!analysisData) return;
-    
+
     setSyllabusAnalysis(analysisData);
-    setTitle(`${mockPatterns[0].name}: ${analysisData.basicInfo.courseTitle}`);
-    setCourseId('1');
+    setTitle(`${mockPatterns[0].name}: ${analysisData.basicInfo?.courseTitle || 'Course'}`);
+    setCourseId(courses[0]?.id || '');
     // Now that we have analysis data, proceed to the question customization step
     setActiveStep(2);
   };
-  
-  // Handle pattern selection
-  const handlePatternSelection = (pattern) => {
-    setSelectedPattern(pattern);
-  };
-  
+
   // Generate questions based on syllabus and pattern
-  const handleGenerateQuestions = () => {
+  const handleGenerateQuestions = async () => {
+    if (generating) return;
     if (!selectedPattern || !syllabusAnalysis) {
-      alert('Please select a pattern and upload a syllabus before generating questions.');
+      notify('Please select a pattern and upload a syllabus before generating questions.', 'warning');
       return;
     }
-    
+
     setGenerating(true);
-    
-    // Call the API to generate questions using Gemini AI
-    fetch('/api/assessment/generate-questions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Include auth token in a real application
-        // 'Authorization': `Bearer ${authToken}`
-      },
-      body: JSON.stringify({
-        syllabusAnalysis: syllabusAnalysis,
-        pattern: selectedPattern
-      })
-    })
-      .then(response => {
-        if (!response.ok) {
-          // Check for specific error status codes
-          if (response.status === 500) {
-            throw new Error('Server error: The Gemini API may not be configured properly.');
-          } else if (response.status === 400) {
-            throw new Error('Invalid request: Please check your syllabus and pattern selection.');
-          } else {
-            throw new Error(`Server responded with status: ${response.status}`);
-          }
+
+    try {
+      // The backend enforces `questionDistribution` ({type, count, pointsEach});
+      // the local patterns only define `structure`, so derive it.
+      const pattern = {
+        ...selectedPattern,
+        questionDistribution: selectedPattern.questionDistribution || (selectedPattern.structure || []).map(s => ({
+          type: normalizeQuestionType(s.questionType),
+          count: s.count,
+          pointsEach: s.pointsPerQuestion
+        }))
+      };
+
+      // axios carries the x-auth-token header (the old fetch call had none -> 401)
+      const { data } = await axios.post('/api/assessment/generate-questions', {
+        syllabusAnalysis,
+        pattern
+      }, { timeout: 120000 });
+
+      if (data?.success && Array.isArray(data.assessment?.questions) && data.assessment.questions.length) {
+        const formattedQuestions = data.assessment.questions.map((q, index) => toEditorQuestion({ ...q, id: undefined }, index, 'gen'));
+        setQuestions(formattedQuestions);
+
+        // Update assessment title and description if provided by the API
+        if (data.assessment.title) {
+          setTitle(data.assessment.title);
         }
-        return response.json();
-      })
-      .then(data => {
-        if (data.success && data.assessment && data.assessment.questions) {
-          console.log('Generated assessment with Gemini API:', data.message);
-          
-          // Transform the questions to match our frontend structure if needed
-          const formattedQuestions = data.assessment.questions.map((q, index) => ({
-            id: `gen-${index + 1}`,
-            question: q.question,
-            questionType: q.questionType,
-            options: q.options || [],
-            correctAnswer: q.groundTruth || q.correctAnswer,
-            topic: q.topic,
-            difficulty: q.difficulty || 'Medium',
-            points: q.points || parseInt(selectedPattern.structure.find(s => 
-              s.questionType === q.questionType || 
-              s.questionType.toLowerCase() === q.questionType.toLowerCase()
-            )?.pointsPerQuestion) || 2,
-            bloomLevel: q.bloomLevel || 'Remember',
-            rubric: q.rubric || {
-              accuracy: { weight: 0.6, criteria: ["Factual correctness", "Completeness"] },
-              conceptualUnderstanding: { weight: 0.3, criteria: ["Depth of understanding"] },
-              presentation: { weight: 0.1, criteria: ["Clarity of explanation"] }
-            },
-            relatedConcepts: q.relatedConcepts || []
-          }));
-          
-          setQuestions(formattedQuestions);
-          
-          // Update assessment title and description if provided by the API
-          if (data.assessment.title) {
-            setTitle(data.assessment.title);
-          }
-          
-          if (data.assessment.description) {
-            setDescription(data.assessment.description);
-          }
-          
-          // Update time limit if provided
-          if (data.assessment.timeLimit) {
-            setTimeLimit(data.assessment.timeLimit);
-          }
-          
-          // Show success message
-          alert(`Successfully generated ${formattedQuestions.length} questions using Gemini AI!`);
-        } else {
-          // Handle error case from API response
-          console.error('Failed to generate questions:', data);
-          
-          if (data.error && data.error.includes('GEMINI_API_KEY')) {
-            alert('Gemini API Key is missing or invalid. Please contact your administrator to configure the Gemini API.');
-          } else {
-            alert('Failed to generate questions with Gemini AI. Please try again with a different pattern or syllabus.');
-          }
+
+        if (data.assessment.description) {
+          setDescription(data.assessment.description);
         }
-        setGenerating(false);
-      })
-      .catch(error => {
-        console.error('Error generating questions:', error);
-        
-        // Provide more specific error messages
-        if (error.message.includes('Gemini API')) {
-          alert('Gemini API error: ' + error.message);
-        } else {
-          alert('An error occurred while generating questions with Gemini AI. Please try again.');
+
+        // Update time limit if provided
+        if (data.assessment.timeLimit) {
+          setTimeLimit(data.assessment.timeLimit);
         }
-        
-        setGenerating(false);
-      });
+
+        // Show success message
+        notify(`Generated ${formattedQuestions.length} questions with Gemini AI.`, 'success');
+      } else {
+        notify(data?.message || 'Failed to generate questions with Gemini AI. Please try again with a different pattern or syllabus.', 'error');
+      }
+    } catch (error) {
+      console.error('Error generating questions:', error);
+      notify(`An error occurred while generating questions: ${error.response?.data?.message || error.message}`, 'error');
+    } finally {
+      setGenerating(false);
+    }
   };
-  
-  // Add a new question manually
+
+  // Add a new question manually (opens the editor; added on save)
   const handleAddQuestion = () => {
-    const newQuestion = {
-      id: `new-${questions.length + 1}`,
+    setEditingQuestion({
+      id: `new-${Date.now()}`,
       question: '',
       questionType: 'Multiple Choice',
       options: ['', '', '', ''],
@@ -406,15 +406,80 @@ const AssessmentCreation = () => {
       topic: '',
       difficulty: 'Medium',
       points: 2,
-      bloomLevel: 'Remember'
-    };
-    
-    setQuestions([...questions, newQuestion]);
+      bloomLevel: 'Remember',
+      isNew: true
+    });
   };
-  
+
+  const handleEditQuestion = (question) => {
+    setEditingQuestion({ ...question, options: [...(question.options || [])] });
+  };
+
+  const updateEditingQuestion = (field, value) => {
+    setEditingQuestion(prev => {
+      const next = { ...prev, [field]: value };
+      if (field === 'questionType') {
+        if (value === 'True/False') {
+          next.options = ['True', 'False'];
+          if (!next.options.includes(next.correctAnswer)) next.correctAnswer = 'True';
+        } else if (value === 'Multiple Choice') {
+          next.options = prev.options && prev.options.length >= 2 && prev.questionType === 'Multiple Choice'
+            ? prev.options
+            : ['', '', '', ''];
+          if (!next.options.includes(next.correctAnswer)) next.correctAnswer = '';
+        } else {
+          next.options = [];
+        }
+      }
+      return next;
+    });
+  };
+
+  const updateEditingOption = (index, value) => {
+    setEditingQuestion(prev => {
+      const options = [...prev.options];
+      const wasCorrect = prev.correctAnswer === options[index];
+      options[index] = value;
+      return { ...prev, options, correctAnswer: wasCorrect ? value : prev.correctAnswer };
+    });
+  };
+
+  const handleSaveQuestion = () => {
+    if (!editingQuestion) return;
+    const { isNew, ...question } = editingQuestion;
+    const cleaned = {
+      ...question,
+      question: question.question.trim(),
+      options: OPTION_QUESTION_TYPES.includes(question.questionType)
+        ? question.options.map(o => o.trim()).filter(Boolean)
+        : [],
+      correctAnswer: typeof question.correctAnswer === 'string' ? question.correctAnswer.trim() : question.correctAnswer,
+      points: Math.max(0, Number(question.points) || 0),
+      topic: (question.topic || '').trim() || 'General'
+    };
+    setQuestions(prev => (isNew
+      ? [...prev, cleaned]
+      : prev.map(q => (q.id === cleaned.id ? cleaned : q))));
+    setEditingQuestion(null);
+  };
+
+  const editingQuestionError = (() => {
+    if (!editingQuestion) return null;
+    if (!editingQuestion.question.trim()) return 'Enter the question text';
+    if (OPTION_QUESTION_TYPES.includes(editingQuestion.questionType)) {
+      const options = editingQuestion.options.map(o => o.trim()).filter(Boolean);
+      if (options.length < 2) return 'Provide at least two options';
+      if (!editingQuestion.correctAnswer || !options.includes(editingQuestion.correctAnswer.trim())) {
+        return 'Select the correct answer';
+      }
+    }
+    if (!(Number(editingQuestion.points) > 0)) return 'Points must be greater than 0';
+    return null;
+  })();
+
   // Remove a question
   const handleRemoveQuestion = (id) => {
-    setQuestions(questions.filter(q => q.id !== id));
+    setQuestions(prev => prev.filter(q => q.id !== id));
   };
   
   // Handle tab change
@@ -424,18 +489,33 @@ const AssessmentCreation = () => {
   
   // Save assessment
   const handleSave = async () => {
+    if (loading) return;
+    const emptyIndex = questions.findIndex(q => !String(q.question || '').trim());
+    if (emptyIndex !== -1) {
+      notify(`Question ${emptyIndex + 1} has no text. Edit or remove it before saving.`, 'warning');
+      return;
+    }
+
+    // Students' AssessmentTake and the backend grader expect kebab-case types
+    const normalizedQuestions = questions.map(q => {
+      const type = normalizeQuestionType(q.questionType);
+      return { ...q, questionType: type, type, points: pointsOf(q) };
+    });
+
     // Prepare assessment data
     const assessmentData = {
-      id: assessmentId || `new-${Date.now()}`,
-      title,
+      id: draftIdRef.current,
+      title: title.trim(),
       description,
       courseId,
+      courseName: courses.find(c => c.id === courseId)?.title,
+      syllabusTitle,
       dueDate,
-      timeLimit,
+      timeLimit: Number(timeLimit) || 0,
       randomizeQuestions,
       showAnswers,
       assignToAllStudents,
-      questions,
+      questions: normalizedQuestions,
       pattern: selectedPattern,
       // Add these fields for student display
       questionCount: questions.length,
@@ -452,7 +532,7 @@ const AssessmentCreation = () => {
         pattern: selectedPattern ? {
           name: selectedPattern.name,
           description: selectedPattern.description,
-          questionDistribution: selectedPattern.structure,
+          questionDistribution: selectedPattern.questionDistribution || selectedPattern.structure,
           difficulty: selectedPattern.difficulty
         } : null
       }
@@ -463,13 +543,13 @@ const AssessmentCreation = () => {
     try {
       // Use the assessment save service to save both locally and to backend
       await saveAssessment(assessmentData);
-      alert('Assessment saved successfully!');
+      notify('Assessment saved successfully!', 'success');
       
       // Navigate back to course management page
       navigate(`/instructor/courses/${courseId}`);
     } catch (error) {
       console.error('Error saving assessment:', error);
-      alert(`Error saving assessment: ${error.message}`);
+      notify(`Error saving assessment: ${error.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -477,7 +557,7 @@ const AssessmentCreation = () => {
   
   // Calculate total points
   const calculateTotalPoints = () => {
-    return questions.reduce((total, question) => total + question.points, 0);
+    return questions.reduce((total, question) => total + pointsOf(question), 0);
   };
   
   if (loading) {
@@ -612,7 +692,7 @@ const AssessmentCreation = () => {
               {questions
                 .filter(q => {
                   if (activeTab === 0) return true;
-                  if (activeTab === 1) return q.questionType === 'Multiple Choice';
+                  if (activeTab === 1) return OPTION_QUESTION_TYPES.includes(q.questionType);
                   if (activeTab === 2) return ['Short Answer', 'Essay'].includes(q.questionType);
                   if (activeTab === 3) return q.questionType === 'Programming';
                   return true;
@@ -623,7 +703,7 @@ const AssessmentCreation = () => {
                       alignItems="flex-start"
                       secondaryAction={
                         <Box>
-                          <IconButton edge="end" onClick={() => {}}>
+                          <IconButton edge="end" aria-label="edit question" onClick={() => handleEditQuestion(question)}>
                             <EditIcon />
                           </IconButton>
                           <IconButton edge="end" onClick={() => handleRemoveQuestion(question.id)}>
@@ -639,9 +719,11 @@ const AssessmentCreation = () => {
                         </Typography>
                       </ListItemIcon>
                       <ListItemText
+                        primaryTypographyProps={{ component: 'div' }}
+                        secondaryTypographyProps={{ component: 'div' }}
                         primary={
                           <Box sx={{ mb: 1 }}>
-                            <Typography variant="body1">{question.question}</Typography>
+                            <Typography variant="body1">{question.question || <em>(no question text)</em>}</Typography>
                           </Box>
                         }
                         secondary={
@@ -675,9 +757,9 @@ const AssessmentCreation = () => {
                               />
                             </Box>
                             
-                            {question.questionType === 'Multiple Choice' && (
+                            {OPTION_QUESTION_TYPES.includes(question.questionType) && (
                               <List dense>
-                                {question.options.map((option, idx) => (
+                                {(question.options || []).map((option, idx) => (
                                   <ListItem key={idx} dense sx={{ py: 0 }}>
                                     <ListItemIcon sx={{ minWidth: 32 }}>
                                       {option === question.correctAnswer ? (
@@ -697,9 +779,9 @@ const AssessmentCreation = () => {
                             {(question.questionType === 'Short Answer' || question.questionType === 'Essay') && (
                               <Box sx={{ mt: 1 }}>
                                 <Typography variant="body2" color="text.secondary">
-                                  <b>Sample Answer:</b> {question.correctAnswer.length > 100 ? 
-                                    `${question.correctAnswer.substring(0, 100)}...` : 
-                                    question.correctAnswer}
+                                  <b>Sample Answer:</b> {String(question.correctAnswer || '').length > 100 ?
+                                    `${String(question.correctAnswer).substring(0, 100)}...` :
+                                    String(question.correctAnswer || '')}
                                 </Typography>
                               </Box>
                             )}
@@ -721,7 +803,7 @@ const AssessmentCreation = () => {
                                     overflow: 'hidden'
                                   }}
                                 >
-                                  {question.correctAnswer.split('\n').slice(0, 3).join('\n')}...
+                                  {String(question.correctAnswer || '').split('\n').slice(0, 3).join('\n')}...
                                 </Typography>
                               </Box>
                             )}
@@ -905,10 +987,10 @@ const AssessmentCreation = () => {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {['Multiple Choice', 'Short Answer', 'Essay', 'Programming'].map(type => {
+                      {[...new Set([...EDITABLE_QUESTION_TYPES, ...questions.map(q => q.questionType)])].map(type => {
                         const typeQuestions = questions.filter(q => q.questionType === type);
                         if (typeQuestions.length === 0) return null;
-                        
+
                         return (
                           <TableRow key={type}>
                             <TableCell component="th" scope="row">
@@ -916,12 +998,12 @@ const AssessmentCreation = () => {
                             </TableCell>
                             <TableCell align="right">{typeQuestions.length}</TableCell>
                             <TableCell align="right">
-                              {typeQuestions.length > 0 
-                                ? `${Math.min(...typeQuestions.map(q => q.points))} - ${Math.max(...typeQuestions.map(q => q.points))}`
+                              {typeQuestions.length > 0
+                                ? `${Math.min(...typeQuestions.map(pointsOf))} - ${Math.max(...typeQuestions.map(pointsOf))}`
                                 : 'N/A'}
                             </TableCell>
                             <TableCell align="right">
-                              {typeQuestions.reduce((sum, q) => sum + q.points, 0)}
+                              {typeQuestions.reduce((sum, q) => sum + pointsOf(q), 0)}
                             </TableCell>
                           </TableRow>
                         );
@@ -953,7 +1035,7 @@ const AssessmentCreation = () => {
                 <Button 
                   variant="contained" 
                   onClick={handleSave}
-                  disabled={!title || !courseId}
+                  disabled={loading || !title.trim() || !courseId}
                   startIcon={<CheckCircleIcon />}
                 >
                   {isEditing ? 'Save Changes' : 'Create Assessment'}
@@ -963,6 +1045,143 @@ const AssessmentCreation = () => {
           </Box>
         )}
       </Paper>
+
+      {/* Add / edit question dialog */}
+      <Dialog open={Boolean(editingQuestion)} onClose={() => setEditingQuestion(null)} maxWidth="md" fullWidth>
+        <DialogTitle>{editingQuestion?.isNew ? 'Add Question' : 'Edit Question'}</DialogTitle>
+        {editingQuestion && (
+          <DialogContent>
+            <TextField
+              autoFocus
+              label="Question"
+              value={editingQuestion.question}
+              onChange={(e) => updateEditingQuestion('question', e.target.value)}
+              fullWidth
+              multiline
+              minRows={2}
+              margin="dense"
+              required
+            />
+            <Grid container spacing={2} sx={{ mt: 0 }}>
+              <Grid item xs={12} sm={4}>
+                <FormControl fullWidth margin="dense">
+                  <InputLabel>Question Type</InputLabel>
+                  <Select
+                    value={EDITABLE_QUESTION_TYPES.includes(editingQuestion.questionType) ? editingQuestion.questionType : ''}
+                    label="Question Type"
+                    onChange={(e) => updateEditingQuestion('questionType', e.target.value)}
+                  >
+                    {EDITABLE_QUESTION_TYPES.map(type => (
+                      <MenuItem key={type} value={type}>{type}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={6} sm={4}>
+                <FormControl fullWidth margin="dense">
+                  <InputLabel>Difficulty</InputLabel>
+                  <Select
+                    value={['Easy', 'Medium', 'Hard'].includes(editingQuestion.difficulty) ? editingQuestion.difficulty : 'Medium'}
+                    label="Difficulty"
+                    onChange={(e) => updateEditingQuestion('difficulty', e.target.value)}
+                  >
+                    <MenuItem value="Easy">Easy</MenuItem>
+                    <MenuItem value="Medium">Medium</MenuItem>
+                    <MenuItem value="Hard">Hard</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={6} sm={4}>
+                <TextField
+                  label="Points"
+                  type="number"
+                  value={editingQuestion.points}
+                  onChange={(e) => updateEditingQuestion('points', e.target.value)}
+                  fullWidth
+                  margin="dense"
+                  InputProps={{ inputProps: { min: 1 } }}
+                />
+              </Grid>
+            </Grid>
+            <TextField
+              label="Topic"
+              value={editingQuestion.topic || ''}
+              onChange={(e) => updateEditingQuestion('topic', e.target.value)}
+              fullWidth
+              margin="dense"
+            />
+
+            {editingQuestion.questionType === 'Multiple Choice' && (
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Options (select the correct answer)
+                </Typography>
+                {editingQuestion.options.map((option, idx) => (
+                  <Box key={idx} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <IconButton
+                      size="small"
+                      aria-label={`mark option ${String.fromCharCode(65 + idx)} correct`}
+                      onClick={() => updateEditingQuestion('correctAnswer', option)}
+                      disabled={!option.trim()}
+                    >
+                      <CheckCircleIcon
+                        fontSize="small"
+                        color={option.trim() && option === editingQuestion.correctAnswer ? 'success' : 'disabled'}
+                      />
+                    </IconButton>
+                    <TextField
+                      size="small"
+                      label={`Option ${String.fromCharCode(65 + idx)}`}
+                      value={option}
+                      onChange={(e) => updateEditingOption(idx, e.target.value)}
+                      fullWidth
+                    />
+                  </Box>
+                ))}
+              </Box>
+            )}
+
+            {editingQuestion.questionType === 'True/False' && (
+              <FormControl fullWidth margin="dense">
+                <InputLabel>Correct Answer</InputLabel>
+                <Select
+                  value={editingQuestion.correctAnswer === 'False' ? 'False' : 'True'}
+                  label="Correct Answer"
+                  onChange={(e) => updateEditingQuestion('correctAnswer', e.target.value)}
+                >
+                  <MenuItem value="True">True</MenuItem>
+                  <MenuItem value="False">False</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+
+            {!OPTION_QUESTION_TYPES.includes(editingQuestion.questionType) && (
+              <TextField
+                label={editingQuestion.questionType === 'Programming' ? 'Sample Solution' : 'Sample Answer'}
+                value={editingQuestion.correctAnswer || ''}
+                onChange={(e) => updateEditingQuestion('correctAnswer', e.target.value)}
+                fullWidth
+                multiline
+                minRows={3}
+                margin="dense"
+                InputProps={editingQuestion.questionType === 'Programming' ? { sx: { fontFamily: 'monospace' } } : undefined}
+              />
+            )}
+
+            {editingQuestionError && (
+              <Typography variant="caption" color="error" display="block" sx={{ mt: 1 }}>
+                {editingQuestionError}
+              </Typography>
+            )}
+          </DialogContent>
+        )}
+        <DialogActions>
+          <Button onClick={() => setEditingQuestion(null)}>Cancel</Button>
+          <Button variant="contained" onClick={handleSaveQuestion} disabled={Boolean(editingQuestionError)}>
+            {editingQuestion?.isNew ? 'Add Question' : 'Save Question'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 };

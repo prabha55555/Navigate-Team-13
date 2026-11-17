@@ -16,17 +16,23 @@ import {
     Divider,
     Grid,
     List, ListItem, ListItemIcon, ListItemText,
+    MenuItem,
     Paper,
     Tab,
-    Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
+    Table, TableBody, TableCell, TableContainer, TableHead, TablePagination, TableRow,
+    TableSortLabel,
     Tabs,
+    TextField,
     Typography
 } from '@mui/material';
-import { useEffect, useState } from 'react';
+import axios from 'axios';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
+import { findInstructorAssessment, loadInstructorCourses } from './instructorData';
 
 // Mock data moved to a separate constant at the bottom for clarity
+
+const PASS_THRESHOLD = 50;
 
 function TabPanel(props) {
   const { children, value, index, ...other } = props;
@@ -48,21 +54,69 @@ function TabPanel(props) {
   );
 }
 
+const percentOf = (score, maxScore) => (maxScore > 0 ? Math.round((score / maxScore) * 100) : 0);
+
+// GET /api/student/assessment/submissions/:courseId -> row shape used by this page
+const toResultRow = (submission) => {
+  const score = Number(submission.score) || 0;
+  const maxScore = Number(submission.maxScore) || 0;
+  const percentage = submission.percentage != null && Number.isFinite(Number(submission.percentage))
+    ? Number(submission.percentage)
+    : percentOf(score, maxScore);
+  // The student flow (AssessmentTake) sends timeSpent in seconds
+  const seconds = Number(submission.timeSpent ?? submission.timeTaken) || 0;
+  return {
+    id: submission.id || submission.submissionId,
+    name: submission.studentName || submission.name || 'Unknown Student',
+    email: submission.email || '',
+    studentId: String(submission.studentId || ''),
+    assessmentId: submission.assessmentId != null ? String(submission.assessmentId) : '',
+    assessmentTitle: submission.assessmentTitle || 'Assessment',
+    courseId: submission.courseId,
+    score,
+    maxScore,
+    percentage,
+    isPassed: typeof submission.isPassed === 'boolean' ? submission.isPassed : percentage >= PASS_THRESHOLD,
+    submissionDate: submission.submissionDate || submission.submittedAt,
+    status: submission.status || 'completed',
+    timeSpent: seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : 0
+  };
+};
+
+const round1 = (value) => Math.round(value * 10) / 10;
+
+const computeStatistics = (rows) => {
+  if (!rows.length) return null;
+  const percentages = rows.map(r => r.percentage).sort((a, b) => a - b);
+  const count = percentages.length;
+  const average = percentages.reduce((sum, p) => sum + p, 0) / count;
+  const middle = Math.floor(count / 2);
+  const median = count % 2 ? percentages[middle] : (percentages[middle - 1] + percentages[middle]) / 2;
+  const variance = percentages.reduce((sum, p) => sum + (p - average) ** 2, 0) / count;
+  return {
+    totalSubmissions: count,
+    averageScore: round1(average),
+    medianScore: round1(median),
+    highestScore: percentages[count - 1],
+    lowestScore: percentages[0],
+    standardDeviation: round1(Math.sqrt(variance)),
+    passRate: Math.round((rows.filter(r => r.isPassed).length / count) * 100)
+  };
+};
+
+const assessmentKey = (row) => row.assessmentId || row.assessmentTitle;
+
 const StudentResults = () => {
   const { courseId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { currentUser } = useAuth();
-  const isInstructor = currentUser?.role === 'instructor';
-  
+
   const [loading, setLoading] = useState(true);
   const [results, setResults] = useState([]);
-  const [statistics, setStatistics] = useState(null);
-  const [assessments, setAssessments] = useState([]);
+  const [usingSampleData, setUsingSampleData] = useState(false);
   const [selectedStudentId, setSelectedStudentId] = useState(null);
-  const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [studentDetail, setStudentDetail] = useState(null);
-  
+
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [order, setOrder] = useState('desc');
@@ -71,113 +125,111 @@ const StudentResults = () => {
   const [selectedAssessment, setSelectedAssessment] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
   const [tabValue, setTabValue] = useState(0);
-    useEffect(() => {
-    // Parse query parameters
-    const queryParams = new URLSearchParams(location.search);
-    const assessmentId = queryParams.get('assessment');
-    if (assessmentId) {
-      setSelectedAssessment(assessmentId);
-    }
-    
-    // Fetch real submission data from the API
-    const fetchStudentResults = async () => {
-      try {
-        console.log('=== FETCHING STUDENT RESULTS FOR INSTRUCTOR ===');
-        console.log('Course ID:', courseId);
-        
-        const token = localStorage.getItem('token');
-        if (!token) {
-          console.error('No authentication token found');
-          setLoading(false);
-          return;
-        }
-        
-        // Fetch submissions for this course
-        const response = await fetch(`/api/instructor/course/${courseId}/submissions`, {
-          headers: {
-            'x-auth-token': token,
-            'Content-Type': 'application/json'
+
+  // ?assessment=<id> (from Course Management) pre-selects the assessment filter
+  useEffect(() => {
+    const assessmentParam = new URLSearchParams(location.search).get('assessment');
+    setSelectedAssessment(assessmentParam || 'all');
+    setPage(0);
+  }, [location.search]);
+
+  // Fetch submissions for the course (or for every instructor course when no course is given).
+  // GET /api/student/assessment/submissions/:courseId returns what students submitted via
+  // /api/student/assessment/submit (the old /api/instructor/course/... URL does not exist).
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setUsingSampleData(false);
+    setSelectedStudentId(null);
+    setStudentDetail(null);
+    setTabValue(0);
+    setPage(0);
+
+    const courseIds = courseId ? [courseId] : loadInstructorCourses().map(c => c.id);
+
+    Promise.allSettled(courseIds.map(id =>
+      axios.get(`/api/student/assessment/submissions/${encodeURIComponent(id)}`, { timeout: 30000 })
+    )).then(outcomes => {
+      if (cancelled) return;
+      const succeeded = outcomes.filter(o => o.status === 'fulfilled' && o.value.data?.success);
+
+      if (courseIds.length > 0 && succeeded.length === 0) {
+        const firstError = outcomes.find(o => o.status === 'rejected');
+        console.error('Error fetching student results:', firstError ? firstError.reason : 'invalid response');
+        // Use mock data as fallback so the page is still usable offline
+        setResults(mockStudentResults);
+        setUsingSampleData(true);
+        return;
+      }
+
+      const seen = new Set();
+      const rows = [];
+      succeeded.forEach(o => {
+        (Array.isArray(o.value.data.submissions) ? o.value.data.submissions : []).forEach(sub => {
+          const row = toResultRow(sub);
+          if (row.id && !seen.has(row.id)) {
+            seen.add(row.id);
+            rows.push(row);
           }
         });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        
-        if (data.success && data.submissions) {
-          console.log(`Found ${data.submissions.length} submissions for course ${courseId}`);
-          setResults(data.submissions);
-          
-          // Generate basic statistics from the submissions
-          const stats = {
-            totalSubmissions: data.submissions.length,
-            averageScore: data.submissions.length > 0 
-              ? Math.round(data.submissions.reduce((sum, sub) => sum + sub.percentage, 0) / data.submissions.length)
-              : 0,
-            passRate: data.submissions.length > 0
-              ? Math.round((data.submissions.filter(sub => sub.isPassed).length / data.submissions.length) * 100)
-              : 0,
-            completionRate: 100 // All fetched submissions are completed
-          };
-          setStatistics(stats);
-          
-          // Extract unique assessments from submissions
-          const uniqueAssessments = [...new Map(
-            data.submissions.map(sub => [sub.assessmentId, {
-              id: sub.assessmentId,
-              title: sub.assessmentTitle
-            }])
-          ).values()];
-          setAssessments(uniqueAssessments);
-          
-        } else {
-          console.warn('No submissions found or invalid response format');
-          // Use mock data as fallback
-          setResults(mockStudentResults);
-          setStatistics(mockStatistics);
-          setAssessments(mockAssessments);
-        }
-        
-      } catch (error) {
-        console.error('Error fetching student results:', error);
-        // Use mock data as fallback
-        setResults(mockStudentResults);
-        setStatistics(mockStatistics);
-        setAssessments(mockAssessments);
-      } finally {
-        setLoading(false);
-      }
+      });
+      setResults(rows);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
     };
-    
-    fetchStudentResults();
-  }, [courseId, location.search]);
-  
+  }, [courseId]);
+
+  const statistics = useMemo(() => computeStatistics(results), [results]);
+
+  // Assessments available in the filter (from results, plus the one requested in the URL)
+  const assessmentOptions = useMemo(() => {
+    const options = new Map();
+    results.forEach(row => {
+      const key = assessmentKey(row);
+      if (!options.has(key)) options.set(key, row.assessmentTitle);
+    });
+    if (selectedAssessment !== 'all' && !options.has(selectedAssessment)) {
+      const { assessment } = findInstructorAssessment(selectedAssessment);
+      options.set(selectedAssessment, assessment?.title || selectedAssessment);
+    }
+    return [...options.entries()].map(([value, label]) => ({ value, label }));
+  }, [results, selectedAssessment]);
+
+  // Title of the selected assessment, so a local assessment id also matches
+  // backend submissions (the backend assigns its own assessment ids on save)
+  const selectedAssessmentTitle = useMemo(() => {
+    if (selectedAssessment === 'all') return null;
+    return assessmentOptions.find(o => o.value === selectedAssessment)?.label || null;
+  }, [assessmentOptions, selectedAssessment]);
+
   const handleRequestSort = (property) => {
     const isAsc = orderBy === property && order === 'asc';
     setOrder(isAsc ? 'desc' : 'asc');
     setOrderBy(property);
   };
-  
+
   const handleChangePage = (event, newPage) => {
     setPage(newPage);
   };
-  
+
   const handleChangeRowsPerPage = (event) => {
     setRowsPerPage(parseInt(event.target.value, 10));
     setPage(0);
   };
-  
+
   const handleTabChange = (event, newValue) => {
     setTabValue(newValue);
   };
-  
+
   const handleSearchChange = (event) => {
     setSearchTerm(event.target.value);
     setPage(0);
   };
-  
+
   const handleFilterChange = (type, value) => {
     if (type === 'assessment') {
       setSelectedAssessment(value);
@@ -197,86 +249,97 @@ const StudentResults = () => {
       setStudentDetail(null);
     }
   };
-  
-  const filteredResults = results
-    .filter(result => {
-      // Apply assessment filter
-      if (selectedAssessment !== 'all' && result.assessmentTitle !== selectedAssessment) {
-        return false;
-      }
-      
-      // Apply status filter
-      if (selectedStatus !== 'all' && result.status !== selectedStatus) {
-        return false;
-      }
-      
-      // Apply search filter
-      if (searchTerm) {
-        const searchLower = searchTerm.toLowerCase();
-        return (
-          result.name.toLowerCase().includes(searchLower) ||
-          result.email.toLowerCase().includes(searchLower) ||
-          result.studentId.toLowerCase().includes(searchLower)
-        );
-      }
-      
-      return true;
-    })
-    .sort((a, b) => {
-      // Apply sorting
-      if (orderBy === 'submissionDate') {
-        return order === 'asc'
-          ? new Date(a.submissionDate) - new Date(b.submissionDate)
-          : new Date(b.submissionDate) - new Date(a.submissionDate);
-      }
-      
-      const aValue = a[orderBy];
-      const bValue = b[orderBy];
-      
-      if (typeof aValue === 'string') {
-        return order === 'asc'
-          ? aValue.localeCompare(bValue)
-          : bValue.localeCompare(aValue);
-      }
-      
-      return order === 'asc' ? aValue - bValue : bValue - aValue;
-    })
-    .slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
-    
+
+  // Filter + sort only when the inputs change (not on every render)
+  const sortedResults = useMemo(() => {
+    const searchLower = searchTerm.trim().toLowerCase();
+    return results
+      .filter(result => {
+        // Apply assessment filter
+        if (selectedAssessment !== 'all' &&
+            result.assessmentId !== selectedAssessment &&
+            result.assessmentTitle !== selectedAssessment &&
+            result.assessmentTitle !== selectedAssessmentTitle) {
+          return false;
+        }
+
+        // Apply status (pass/fail) filter
+        if (selectedStatus === 'passed' && !result.isPassed) return false;
+        if (selectedStatus === 'failed' && result.isPassed) return false;
+
+        // Apply search filter
+        if (searchLower) {
+          return (
+            (result.name || '').toLowerCase().includes(searchLower) ||
+            (result.email || '').toLowerCase().includes(searchLower) ||
+            (result.studentId || '').toLowerCase().includes(searchLower)
+          );
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        // Apply sorting
+        if (orderBy === 'submissionDate') {
+          return order === 'asc'
+            ? new Date(a.submissionDate) - new Date(b.submissionDate)
+            : new Date(b.submissionDate) - new Date(a.submissionDate);
+        }
+
+        const aValue = a[orderBy];
+        const bValue = b[orderBy];
+
+        if (typeof aValue === 'string') {
+          return order === 'asc'
+            ? aValue.localeCompare(bValue || '')
+            : (bValue || '').localeCompare(aValue);
+        }
+
+        return order === 'asc' ? aValue - bValue : bValue - aValue;
+      });
+  }, [results, searchTerm, selectedAssessment, selectedAssessmentTitle, selectedStatus, order, orderBy]);
+
+  const filteredResults = sortedResults.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
+
   if (loading) {
     return (
-      <Box 
-        display="flex" 
-        justifyContent="center" 
-        alignItems="center" 
+      <Box
+        display="flex"
+        justifyContent="center"
+        alignItems="center"
         minHeight="80vh"
       >
         <CircularProgress />
       </Box>
     );
   }
-  
+
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box sx={{ mb: 4 }}>
-        <Button 
-          startIcon={<ArrowBackIcon />} 
-          onClick={() => navigate(`/instructor/courses/${courseId}`)} 
+        <Button
+          startIcon={<ArrowBackIcon />}
+          onClick={() => navigate(courseId ? `/instructor/courses/${courseId}` : '/instructor/courses')}
           variant="outlined"
           sx={{ mb: 2 }}
         >
-          Back to Course
+          {courseId ? 'Back to Course' : 'Back to Courses'}
         </Button>
         <Typography variant="h4" component="h1" gutterBottom>
           Student Assessment Results
         </Typography>
         {/* Removed upcoming assessments section for instructor view */}
+        {usingSampleData && (
+          <Alert severity="warning" sx={{ mt: 1 }}>
+            Could not load submissions from the server. Showing sample data.
+          </Alert>
+        )}
       </Box>
-      
+
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-        <Tabs 
-          value={tabValue} 
-          onChange={handleTabChange} 
+        <Tabs
+          value={tabValue}
+          onChange={handleTabChange}
           variant="fullWidth"
           textColor="primary"
           indicatorColor="primary"
@@ -289,7 +352,7 @@ const StudentResults = () => {
           <Tab icon={<DescriptionIcon />} label="Question Analysis" iconPosition="start" />
         </Tabs>
       </Box>
-      
+
       {/* Assessment Results Tab */}
       <TabPanel value={tabValue} index={0}>
         <Grid container spacing={3}>
@@ -298,15 +361,65 @@ const StudentResults = () => {
               elevation={3} 
               sx={{ p: 3, borderRadius: 2 }}
             >
-              {/* Filters and Search would go here */}
+              {/* Filters and Search */}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                <TextField
+                  size="small"
+                  label="Search students"
+                  value={searchTerm}
+                  onChange={handleSearchChange}
+                  sx={{ minWidth: 220, flex: 1 }}
+                />
+                <TextField
+                  select
+                  size="small"
+                  label="Assessment"
+                  value={selectedAssessment}
+                  onChange={(e) => handleFilterChange('assessment', e.target.value)}
+                  sx={{ minWidth: 220 }}
+                >
+                  <MenuItem value="all">All assessments</MenuItem>
+                  {assessmentOptions.map(option => (
+                    <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                  ))}
+                </TextField>
+                <TextField
+                  select
+                  size="small"
+                  label="Result"
+                  value={selectedStatus}
+                  onChange={(e) => handleFilterChange('status', e.target.value)}
+                  sx={{ minWidth: 140 }}
+                >
+                  <MenuItem value="all">All</MenuItem>
+                  <MenuItem value="passed">Passed</MenuItem>
+                  <MenuItem value="failed">Failed</MenuItem>
+                </TextField>
+              </Box>
               <TableContainer sx={{ mt: 2 }}>
                 <Table>
                   <TableHead>
                     <TableRow>
                       <TableCell sx={{ fontWeight: 'bold' }}>Student</TableCell>
                       <TableCell sx={{ fontWeight: 'bold' }}>Assessment</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Submission Date</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>Score</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }} sortDirection={orderBy === 'submissionDate' ? order : false}>
+                        <TableSortLabel
+                          active={orderBy === 'submissionDate'}
+                          direction={orderBy === 'submissionDate' ? order : 'desc'}
+                          onClick={() => handleRequestSort('submissionDate')}
+                        >
+                          Submission Date
+                        </TableSortLabel>
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }} sortDirection={orderBy === 'percentage' ? order : false}>
+                        <TableSortLabel
+                          active={orderBy === 'percentage'}
+                          direction={orderBy === 'percentage' ? order : 'desc'}
+                          onClick={() => handleRequestSort('percentage')}
+                        >
+                          Score
+                        </TableSortLabel>
+                      </TableCell>
                       <TableCell align="right" sx={{ fontWeight: 'bold' }}>Status</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 'bold' }}>Time Spent</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 'bold' }}>Actions</TableCell>
@@ -314,9 +427,10 @@ const StudentResults = () => {
                   </TableHead>
                   <TableBody>
                     {filteredResults.map((result) => (
-                      <TableRow 
+                      <TableRow
                         key={result.id}
                         hover
+                        selected={result.id === selectedStudentId}
                         onClick={() => handleStudentSelect(result.id)}
                         sx={{ cursor: 'pointer' }}
                       >
@@ -326,21 +440,24 @@ const StudentResults = () => {
                               {result.name}
                             </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {result.studentId}
+                              {result.email || (/^[a-f0-9]{24}$/i.test(result.studentId) ? '' : result.studentId)}
                             </Typography>
                           </Box>
                         </TableCell>
                         <TableCell>{result.assessmentTitle}</TableCell>
                         <TableCell>
-                          {new Date(result.submissionDate).toLocaleString()}
-                        </TableCell>                        <TableCell align="right">
+                          {result.submissionDate && !Number.isNaN(new Date(result.submissionDate).getTime())
+                            ? new Date(result.submissionDate).toLocaleString()
+                            : '-'}
+                        </TableCell>
+                        <TableCell align="right">
                           <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.5 }}>
-                            <Chip 
-                              label={`${result.score}/${result.maxScore} (${result.percentage || Math.round((result.score / result.maxScore) * 100)}%)`} 
+                            <Chip
+                              label={`${result.score}/${result.maxScore} (${result.percentage}%)`}
                               color={
-                                result.score / result.maxScore >= 0.9 ? 'success' :
-                                result.score / result.maxScore >= 0.7 ? 'primary' :
-                                result.score / result.maxScore >= 0.6 ? 'warning' : 'error'
+                                result.percentage >= 90 ? 'success' :
+                                result.percentage >= 70 ? 'primary' :
+                                result.percentage >= 60 ? 'warning' : 'error'
                               }
                               size="small"
                             />
@@ -353,22 +470,16 @@ const StudentResults = () => {
                               color="info"
                               size="small"
                             />
-                            <Chip 
-                              label={result.isPassed !== undefined ? 
-                                (result.isPassed ? 'Passed' : 'Failed') : 
-                                (result.percentage >= 50 || (result.score / result.maxScore) * 100 >= 50 ? 'Passed' : 'Failed')
-                              }
-                              color={result.isPassed !== undefined ? 
-                                (result.isPassed ? 'success' : 'error') : 
-                                (result.percentage >= 50 || (result.score / result.maxScore) * 100 >= 50 ? 'success' : 'error')
-                              }
+                            <Chip
+                              label={result.isPassed ? 'Passed' : 'Failed'}
+                              color={result.isPassed ? 'success' : 'error'}
                               size="small"
                               variant="outlined"
                             />
                           </Box>
                         </TableCell>
                         <TableCell align="right">
-                          {result.timeSpent} min
+                          {result.timeSpent ? `${result.timeSpent} min` : '-'}
                         </TableCell>
                         <TableCell align="right">
                           <Button 
@@ -390,7 +501,7 @@ const StudentResults = () => {
                       <TableRow>
                         <TableCell colSpan={7} align="center">
                           <Typography color="text.secondary">
-                            No results matching your filters
+                            {results.length === 0 ? 'No submissions yet' : 'No results matching your filters'}
                           </Typography>
                         </TableCell>
                       </TableRow>
@@ -398,7 +509,15 @@ const StudentResults = () => {
                   </TableBody>
                 </Table>
               </TableContainer>
-              {/* Pagination would go here */}
+              <TablePagination
+                component="div"
+                count={sortedResults.length}
+                page={Math.min(page, Math.max(0, Math.ceil(sortedResults.length / rowsPerPage) - 1))}
+                onPageChange={handleChangePage}
+                rowsPerPage={rowsPerPage}
+                onRowsPerPageChange={handleChangeRowsPerPage}
+                rowsPerPageOptions={[5, 10, 25, 50]}
+              />
             </Paper>
           </Grid>
         </Grid>
@@ -414,7 +533,7 @@ const StudentResults = () => {
                   {studentDetail.name}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" gutterBottom>
-                  {studentDetail.studentId} • {studentDetail.email}
+                  {[studentDetail.studentId, studentDetail.email].filter(Boolean).join(' • ')}
                 </Typography>
                 <Divider sx={{ my: 2 }} />
                 <Typography variant="h6" gutterBottom>
@@ -844,6 +963,9 @@ const StudentResults = () => {
                     <Typography variant="body1">
                       Standard Deviation: {statistics.standardDeviation}
                     </Typography>
+                    <Typography variant="body1">
+                      Pass Rate: {statistics.passRate}% ({statistics.totalSubmissions} submissions)
+                    </Typography>
                   </Box>
                 ) : (
                   <Typography variant="body1" color="text.secondary">
@@ -869,16 +991,20 @@ const StudentResults = () => {
   );
 };
 
-// Mock data
+// Mock data (already in the row shape produced by toResultRow; timeSpent in minutes)
 const mockStudentResults = [
-  {    id: '1',
+  {
+    id: '1',
     name: 'Emma Johnson',
     email: 'emma.j@example.edu',
     studentId: 'S1001',
+    assessmentId: '1',
     assessmentTitle: 'Java Data Structures Assessment',
     courseCode: 'CS301',
     score: 92,
     maxScore: 100,
+    percentage: 92,
+    isPassed: true,
     submissionDate: '2025-10-12T14:30:00',
     status: 'Completed',
     feedbackProvided: true,
@@ -887,28 +1013,36 @@ const mockStudentResults = [
     improvement: 10
   },
   {
-    id: '2',    name: 'Liam Williams',
+    id: '2',
+    name: 'Liam Williams',
     email: 'l.williams@example.edu',
     studentId: 'S1002',
+    assessmentId: '1',
     assessmentTitle: 'Java Data Structures Assessment',
     courseCode: 'CS301',
     score: 78,
     maxScore: 100,
+    percentage: 78,
+    isPassed: true,
     submissionDate: '2025-10-12T13:45:00',
     status: 'Completed',
     feedbackProvided: true,
     attempts: 1,
     timeSpent: 90, // minutes
     improvement: -5
-  },  {
+  },
+  {
     id: '3',
     name: 'Olivia Smith',
     email: 'o.smith@example.edu',
     studentId: 'S1003',
+    assessmentId: '1',
     assessmentTitle: 'Java Data Structures Assessment',
     courseCode: 'CS301',
     score: 85,
     maxScore: 100,
+    percentage: 85,
+    isPassed: true,
     submissionDate: '2025-10-12T15:20:00',
     status: 'Completed',
     feedbackProvided: true,
@@ -916,24 +1050,6 @@ const mockStudentResults = [
     timeSpent: 65, // minutes
     improvement: 5
   }
-];
-
-const mockStatistics = {
-  averageScore: 83.2,
-  medianScore: 84,
-  highestScore: 95,
-  lowestScore: 68,
-  standardDeviation: 7.8,
-  submissionRate: 92,
-  completionRate: 100,
-  averageTimeSpent: 78, // minutes
-  needsReviewCount: 2
-};
-
-const mockAssessments = [
-  { id: '1', title: 'Java Data Structures Assessment', courseCode: 'CS301', type: 'Exam', dueDate: '2025-10-12' },
-  { id: '2', title: 'Programming Assignment 3', courseCode: 'CS101', type: 'Assignment', dueDate: '2025-10-10' },
-  { id: '3', title: 'Frontend Project', courseCode: 'CS240', type: 'Project', dueDate: '2025-10-20' }
 ];
 
 export default StudentResults;

@@ -1,19 +1,35 @@
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
-import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, List, ListItem, Paper, Step, StepLabel, Stepper, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, List, ListItem, MenuItem, Paper, Step, StepLabel, Stepper, TextField, Typography } from '@mui/material';
 import { styled } from '@mui/material/styles';
 import axios from 'axios'; // Import axios instead of using fetch
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom'; // Import useNavigate hook
-import { useAuth } from '../../contexts/AuthContext'; // Import useAuth hook
+import { loadInstructorCourses, normalizeQuestionType } from '../../pages/instructor/instructorData';
+import { saveAssessment } from '../../services/assessmentSaveService';
 import AssessmentPatternSelector from './AssessmentPatternSelector';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+// Relative by default so requests go through the CRA dev proxy / same origin.
+const API_URL = process.env.REACT_APP_API_URL || '/api';
 
 // Configure axios instance with base URL and default timeout
 const api = axios.create({
   baseURL: API_URL,
-  timeout: 60000 // 60 second timeout
+  timeout: 120000 // AI analysis/generation can take a while; never hang forever
 });
+
+// Prefer the backend's message over axios' generic "Request failed with status code ..."
+const getErrorMessage = (err, fallback) => {
+  if (err?.response?.status === 401) {
+    return 'Authentication error. Please log in again to continue.';
+  }
+  if (err?.code === 'ECONNABORTED') {
+    return 'The request timed out. The AI service may be busy - please try again.';
+  }
+  return err?.response?.data?.message || err?.message || fallback;
+};
+
+// Stable no-op so AssessmentPatternSelector does not see a new callback every render
+const noop = () => {};
 
 // Create axios interceptor to add auth token to all requests
 api.interceptors.request.use(
@@ -59,40 +75,34 @@ const SyllabusUpload = () => {
   const [success, setSuccess] = useState(null);
   const [generatingAssessment, setGeneratingAssessment] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
-  const [apiAccessible, setApiAccessible] = useState(false);
   const [syllabusTopics, setSyllabusTopics] = useState([]);
   const [selectedTopics, setSelectedTopics] = useState([]);
   const [topicDialogOpen, setTopicDialogOpen] = useState(false);
-  const { currentUser, token } = useAuth(); // Get auth context
   const navigate = useNavigate(); // Initialize navigate hook
 
   const patternSectionRef = useRef(null);
 
-  useEffect(() => {
-    const checkApiConnection = async () => {
-      try {
-        const response = await api.get('/health');
-        if (response.status === 200) {
-          setApiAccessible(true);
-        } else {
-          setApiAccessible(false);
-        }
-      } catch (error) {
-        console.error('Error checking API connection:', error);
-        setApiAccessible(false);
-      }
-    };
+  // Any change to the syllabus input invalidates a previous analysis/generation
+  const resetAnalysis = () => {
+    setSyllabusAnalysis(null);
+    setGeneratedAssessment(null);
+    setSyllabusTopics([]);
+    setSelectedTopics([]);
+    setSuccess(null);
+  };
 
-    checkApiConnection();
-  }, []);
+  const isPlainTextFile = (f) => Boolean(f) && (f.type === 'text/plain' || /\.txt$/i.test(f.name || ''));
 
   const handleFileUpload = (event) => {
     const selectedFile = event.target.files[0];
+    // Allow re-selecting the same file later (onChange would not fire otherwise)
+    event.target.value = '';
     if (selectedFile) {
       setFile(selectedFile);
       setError(null);
+      resetAnalysis();
 
-      if (selectedFile.type === 'text/plain') {
+      if (isPlainTextFile(selectedFile)) {
         const reader = new FileReader();
         reader.onload = (e) => {
           setTextContent(e.target.result);
@@ -105,17 +115,27 @@ const SyllabusUpload = () => {
   const handleTextChange = (event) => {
     setTextContent(event.target.value);
     setError(null);
+    if (syllabusAnalysis) resetAnalysis();
+  };
+
+  const handleUploadMethodChange = (method) => {
+    if (method === uploadMethod) return;
+    setUploadMethod(method);
+    setError(null);
+    resetAnalysis();
   };
 
   const handleAnalyzeSyllabus = async () => {
+    if (analyzing) return;
     try {
       setError(null);
+      setSuccess(null);
       setAnalyzing(true);
 
       let syllabusContent = '';
 
       if (uploadMethod === 'file' && file) {
-        if (file.type === 'text/plain') {
+        if (isPlainTextFile(file)) {
           syllabusContent = textContent;
         } else {
           const formData = new FormData();
@@ -136,27 +156,21 @@ const SyllabusUpload = () => {
         throw new Error('Please upload a file or enter text content');
       }
 
-      if (!syllabusContent || syllabusContent.trim().length < 10) {
-        console.error('Syllabus content too short:', syllabusContent);
+      // The backend rejects anything shorter than 50 characters
+      if (!syllabusContent || syllabusContent.trim().length < 50) {
         throw new Error('The syllabus content appears to be too short or empty. Please ensure you have uploaded a complete syllabus document.');
       }
 
-      console.log(`Analyzing syllabus. Content length: ${syllabusContent.length} characters`);
-      
       const analysisResponse = await api.post('/assessment/analyze-syllabus', { syllabusContent });
-      
-      if (analysisResponse.status !== 200) {
-        throw new Error(`API error: ${analysisResponse.status} ${analysisResponse.statusText}`);
-      }
-      
+
       const analysisData = analysisResponse.data;
-      
+
       if (!analysisData.success || !analysisData.syllabusAnalysis) {
         throw new Error(analysisData.message || 'Failed to analyze syllabus');
       }
-      
+
       setSyllabusAnalysis(analysisData.syllabusAnalysis);
-        if (analysisData.syllabusTopics && Array.isArray(analysisData.syllabusTopics)) {
+      if (Array.isArray(analysisData.syllabusTopics) && analysisData.syllabusTopics.length > 0) {
         setSyllabusTopics(analysisData.syllabusTopics);
         setSelectedTopics(analysisData.syllabusTopics);
       } else {
@@ -191,31 +205,44 @@ const SyllabusUpload = () => {
       setActiveStep(1);
     } catch (err) {
       console.error('Error analyzing syllabus:', err);
-      
-      if (err.message.includes('too short') || err.message.includes('empty')) {
+      const message = getErrorMessage(err, 'Error analyzing syllabus. Please try again.');
+
+      if (message.includes('too short') || message.includes('empty')) {
         setError('The syllabus content is too short. Please upload a complete syllabus document with sufficient content for analysis.');
-      } else if (err.message.includes('401') || err.message.includes('Unauthorized')) {
-        setError('Authentication error. Please log in again to continue.');
       } else {
-        setError(err.message || 'Error analyzing syllabus. Please try again.');
+        setError(message);
       }
     } finally {
       setAnalyzing(false);
     }
   };
 
+  // Step 0 "Continue": analyse once, reuse the analysis if the input has not changed
+  const handleContinueToPatterns = () => {
+    if (syllabusAnalysis) {
+      setActiveStep(1);
+      return;
+    }
+    handleAnalyzeSyllabus();
+  };
+
   const handleGenerateAssessment = async () => {
+    if (generatingAssessment) return;
     if (!selectedPattern) {
       setError('Please select an assessment pattern first');
+      return;
+    }
+    if (!syllabusAnalysis) {
+      setError('Please upload and analyze a syllabus first');
       return;
     }
 
     try {
       setError(null);
+      setSuccess(null);
       setGeneratingAssessment(true);
 
-      console.log("Generating assessment with pattern using Gemini API:", selectedPattern.name);
-        const response = await api.post('/instructor/assessment/generate-questions', {
+      const response = await api.post('/instructor/assessment/generate-questions', {
         syllabusAnalysis: syllabusAnalysis,
         pattern: {
           ...selectedPattern,
@@ -224,34 +251,28 @@ const SyllabusUpload = () => {
         }
       });
 
-      if (response.status !== 200) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
-      }
-      
       const data = response.data;
-      
+
       if (!data.success || !data.assessment) {
         throw new Error(data.message || 'Failed to generate assessment');
       }
-      
+      if (!Array.isArray(data.assessment.questions) || data.assessment.questions.length === 0) {
+        throw new Error('The AI did not return any questions. Please try again or choose a different pattern.');
+      }
+
       setGeneratedAssessment(data.assessment);
       setSuccess('Assessment successfully generated!');
       setActiveStep(2);
     } catch (err) {
       console.error('Error generating assessment:', err);
-      setError(err.message || 'Error generating assessment. Please try again.');
+      setError(getErrorMessage(err, 'Error generating assessment. Please try again.'));
     } finally {
       setGeneratingAssessment(false);
     }
   };
 
-  useEffect(() => {
-    if (activeStep === 1 && !syllabusAnalysis && (file || textContent)) {
-      handleAnalyzeSyllabus();
-    }
-  }, [activeStep, syllabusAnalysis]);
-
   const handleBackToUpload = () => {
+    setError(null);
     setActiveStep(0);
   };
   
@@ -354,14 +375,16 @@ const SyllabusUpload = () => {
         <Box sx={{ display: 'flex', mb: 2 }}>
           <Button
             variant={uploadMethod === 'file' ? 'contained' : 'outlined'}
-            onClick={() => setUploadMethod('file')}
+            onClick={() => handleUploadMethodChange('file')}
+            disabled={analyzing}
             sx={{ mr: 1 }}
           >
             File Upload
           </Button>
           <Button
             variant={uploadMethod === 'text' ? 'contained' : 'outlined'}
-            onClick={() => setUploadMethod('text')}
+            onClick={() => handleUploadMethodChange('text')}
+            disabled={analyzing}
           >
             Enter Text
           </Button>
@@ -374,10 +397,11 @@ const SyllabusUpload = () => {
               variant="contained"
               startIcon={<CloudUploadIcon />}
               fullWidth
+              disabled={analyzing}
               sx={{ mb: 1 }}
             >
               Upload Syllabus
-              <VisuallyHiddenInput type="file" onChange={handleFileUpload} />
+              <VisuallyHiddenInput type="file" accept=".pdf,.doc,.docx,.txt" onChange={handleFileUpload} />
             </Button>
             {file && (
               <Typography variant="body2" sx={{ mt: 1 }}>
@@ -396,6 +420,7 @@ const SyllabusUpload = () => {
             placeholder="Paste syllabus content here..."
             value={textContent}
             onChange={handleTextChange}
+            disabled={analyzing}
             sx={{ mb: 2 }}
             variant="outlined"
           />
@@ -419,14 +444,27 @@ const SyllabusUpload = () => {
         </Paper>
       )}
 
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 3 }}>
         <Button
           variant="contained"
           color="primary"
-          onClick={() => setActiveStep(1)}
-          disabled={(uploadMethod === 'file' && !file) || (uploadMethod === 'text' && !textContent)}
+          onClick={handleContinueToPatterns}
+          disabled={analyzing || (uploadMethod === 'file' && !file) || (uploadMethod === 'text' && !textContent.trim())}
         >
-          Continue
+          {analyzing ? (
+            <>
+              <CircularProgress size={24} sx={{ mr: 1 }} />
+              Analyzing syllabus...
+            </>
+          ) : (
+            'Continue'
+          )}
         </Button>
       </Box>
     </Box>
@@ -436,7 +474,8 @@ const SyllabusUpload = () => {
     <Box>
       <Typography variant="body1" paragraph>
         Select an assessment pattern or create a custom pattern. The selected pattern will determine the structure and types of questions generated.
-      </Typography>      {error && (
+      </Typography>
+      {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
         </Alert>
@@ -455,7 +494,7 @@ const SyllabusUpload = () => {
           courseId={null}
           syllabusAnalysis={syllabusAnalysis}
           onPatternSelect={setSelectedPattern}
-          onCustomPatternChange={() => {}}
+          onCustomPatternChange={noop}
           selectedPattern={selectedPattern}
         />
       </Box>
@@ -465,6 +504,7 @@ const SyllabusUpload = () => {
           variant="outlined"
           color="primary"
           onClick={handleBackToUpload}
+          disabled={generatingAssessment}
         >
           Back
         </Button>
@@ -472,7 +512,7 @@ const SyllabusUpload = () => {
           variant="contained"
           color="primary"
           onClick={handleGenerateAssessment}
-          disabled={!selectedPattern || generatingAssessment}
+          disabled={!selectedPattern || !syllabusAnalysis || generatingAssessment}
         >
           {generatingAssessment ? (
             <>
@@ -633,14 +673,13 @@ const SyllabusUpload = () => {
       <Box mt={3}>
         {activeStep === 0 && renderUploadSyllabusStep()}
         {activeStep === 1 && renderPatternSelectionStep()}
-        {activeStep === 2 && renderQuestionsCustomizationStep()}        {activeStep === 3 && (
+        {activeStep === 2 && renderQuestionsCustomizationStep()}
+        {activeStep === 3 && (
           <SettingsAndReviewStep 
             generatedAssessment={generatedAssessment}
             syllabusAnalysis={syllabusAnalysis}
             loading={loading}
             setLoading={setLoading}
-            success={success}
-            setSuccess={setSuccess}
             navigate={navigate}
             setActiveStep={setActiveStep}
             selectedPattern={selectedPattern}
@@ -656,99 +695,104 @@ const SettingsAndReviewStep = ({
   syllabusAnalysis, 
   loading, 
   setLoading, 
-  success, 
-  setSuccess, 
   navigate, 
   setActiveStep,
   selectedPattern
 }) => {
-  const [courseId, setCourseId] = useState('');
+  // Same course list as Course Management (demo courses + locally created ones)
+  const [courses] = useState(() => loadInstructorCourses());
+  const [courseId, setCourseId] = useState(() => courses[0]?.id || '');
   const [assignToAll, setAssignToAll] = useState(true);
   const [formError, setFormError] = useState(null);
   const [message, setMessage] = useState('');
+  const [saved, setSaved] = useState(false);
+  // Stable id so a retry after a failed save updates the same local record
+  const draftIdRef = useRef(`assessment-${Date.now()}`);
+  const navigateTimerRef = useRef(null);
+
+  useEffect(() => () => clearTimeout(navigateTimerRef.current), []);
+
   const handleSaveAssessment = async () => {
-    try {
-      setFormError(null);
-      setLoading(true);
-      
-      if (!generatedAssessment) {
-        throw new Error('Please generate an assessment first');
-      }
-      
-      if (!courseId) {
-        setFormError('Please select a course');
-        setLoading(false);
-        return;
-      }
-        // Prepare assessment data
-      const assessmentData = {
-        id: `assessment-${Date.now()}`,
-        title: generatedAssessment.title,
-        description: generatedAssessment.description || 'Assessment generated from syllabus analysis',
-        courseId: courseId,
-        questions: generatedAssessment.questions,
-        timeLimit: generatedAssessment.timeLimit || 60,
-        totalPoints: generatedAssessment.totalPoints || generatedAssessment.questions.reduce((sum, q) => sum + (q.points || 0), 0),
-        assignToAllStudents: assignToAll,
-        syllabusTitle: syllabusAnalysis.title || 'Generated Assessment',
-        pattern: selectedPattern, // Include the selected pattern in the assessment data
-        status: assignToAll ? 'published' : 'draft', // Explicitly set the status
-        visibility: {
-          instructorCanSeeAnswers: true,
-          studentsCanSeeAnswers: false,
-          studentsCanSeeSyllabusTitle: false,
-          showResultsImmediately: true,
-          pattern: selectedPattern ? {
-            name: selectedPattern.name,
-            description: selectedPattern.description,
-            questionDistribution: selectedPattern.questionDistribution || selectedPattern.structure,
-            difficulty: selectedPattern.difficulty
-          } : null // Include pattern information in visibility settings
-        },
-        dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // Set due date 1 week in the future
-        createdAt: new Date().toISOString()
+    if (loading || saved) return;
+    setFormError(null);
+
+    if (!generatedAssessment) {
+      setFormError('Please generate an assessment first');
+      return;
+    }
+    if (!courseId) {
+      setFormError('Please select a course');
+      return;
+    }
+
+    const course = courses.find(c => c.id === courseId);
+    // Students' renderer/grader expect kebab-case types and unique question ids
+    const questions = (generatedAssessment.questions || []).map((q, index) => {
+      const type = normalizeQuestionType(q.questionType || q.type);
+      return {
+        ...q,
+        id: `q${index + 1}`,
+        questionType: type,
+        type,
+        options: Array.isArray(q.options) ? q.options : [],
+        points: Number(q.points) || 1
       };
-        try {
-        // Try to save to API        console.log(`Saving assessment to API for course ID: ${courseId}...`);
-        const token = localStorage.getItem('token');
-        const response = await axios.post('/api/instructor/assessment/save', assessmentData, {
-          headers: {
-            'Content-Type': 'application/json',
-            'x-auth-token': token
-          }
-        });
-          console.log("Assessment saved to API successfully:", response.data);
-        
-        const successMsg = `Assessment "${assessmentData.title}" has been saved successfully. ${assignToAll ? 'It is now available to students.' : 'It has been saved as a draft.'}`;
-        setSuccess(successMsg);
-        setMessage(successMsg);
-        setLoading(false);
-        
-        return;
-      } catch (apiError) {
-        console.warn("API save failed:", apiError.response ? apiError.response.data : apiError.message);
-        setFormError(`Error saving assessment: ${apiError.response?.data?.message || apiError.message}. Please try again.`);
-        setLoading(false);      }
-      
-      // Show success message
-      const successMsg = `Assessment saved successfully. ${assignToAll ? 'Assessment has been assigned to all students in the course.' : 'Assessment saved as draft.'}`;
-      setSuccess(successMsg);
+    });
+
+    // Prepare assessment data
+    const assessmentData = {
+      id: draftIdRef.current,
+      title: generatedAssessment.title || 'Generated Assessment',
+      description: generatedAssessment.description || 'Assessment generated from syllabus analysis',
+      courseId,
+      courseName: course?.title,
+      questions,
+      timeLimit: Number(generatedAssessment.timeLimit) || 60,
+      totalPoints: questions.reduce((sum, q) => sum + q.points, 0),
+      assignToAllStudents: assignToAll,
+      syllabusTitle: syllabusAnalysis?.basicInfo?.courseTitle || 'Generated Assessment',
+      pattern: selectedPattern, // Include the selected pattern in the assessment data
+      status: assignToAll ? 'published' : 'draft', // Explicitly set the status
+      visibility: {
+        instructorCanSeeAnswers: true,
+        studentsCanSeeAnswers: false,
+        studentsCanSeeSyllabusTitle: false,
+        showResultsImmediately: true,
+        pattern: selectedPattern ? {
+          name: selectedPattern.name,
+          description: selectedPattern.description,
+          questionDistribution: selectedPattern.questionDistribution || selectedPattern.structure,
+          difficulty: selectedPattern.difficulty
+        } : null // Include pattern information in visibility settings
+      },
+      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // Set due date 1 week in the future
+      createdAt: new Date().toISOString()
+    };
+
+    setLoading(true);
+    try {
+      // Saves locally (so Course Management lists it) and to POST /api/assessment/save
+      await saveAssessment(assessmentData);
+
+      const successMsg = `Assessment "${assessmentData.title}" has been saved successfully. ${assignToAll ? 'It is now available to students.' : 'It has been saved as a draft.'}`;
       setMessage(successMsg);
-      
-      // Reset the form or navigate to the course page
-      setTimeout(() => {
+      setSaved(true);
+
+      // Show the confirmation briefly, then go to the course page
+      navigateTimerRef.current = setTimeout(() => {
         navigate(`/instructor/courses/${courseId}`);
-      }, 2000);
+      }, 1500);
     } catch (err) {
       console.error('Error saving assessment:', err);
-      setFormError(err.message || 'Error saving assessment');
+      setFormError(`Error saving assessment: ${err.message || 'Unknown error'}. Please try again.`);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <Box>      <Typography variant="h6" gutterBottom>
+    <Box>
+      <Typography variant="h6" gutterBottom>
         Settings & Review
       </Typography>
 
@@ -758,26 +802,35 @@ const SettingsAndReviewStep = ({
         </Alert>
       )}
 
-      {success && (
+      {message && (
         <Alert severity="success" sx={{ mb: 2 }}>
-          {message || success}
+          {message}
         </Alert>
       )}
 
       <Box mb={3}>
         <TextField
-          label="Course ID"
+          select
+          label="Course"
           fullWidth
           value={courseId}
           onChange={(e) => setCourseId(e.target.value)}
           variant="outlined"
+          disabled={loading || saved}
           sx={{ mb: 2 }}
-        />
+        >
+          {courses.map(course => (
+            <MenuItem key={course.id} value={course.id}>
+              {course.code ? `${course.code} - ${course.title}` : course.title}
+            </MenuItem>
+          ))}
+        </TextField>
         <FormControlLabel
           control={
             <Checkbox
               checked={assignToAll}
               onChange={(e) => setAssignToAll(e.target.checked)}
+              disabled={loading || saved}
             />
           }
           label="Assign to all students in the course"
@@ -789,6 +842,7 @@ const SettingsAndReviewStep = ({
           variant="outlined"
           color="primary"
           onClick={() => setActiveStep(2)}
+          disabled={loading || saved}
         >
           Back to Questions
         </Button>
@@ -796,7 +850,7 @@ const SettingsAndReviewStep = ({
           variant="contained"
           color="primary"
           onClick={handleSaveAssessment}
-          disabled={loading}
+          disabled={loading || saved || !courseId}
         >
           {loading ? (
             <>
@@ -804,7 +858,7 @@ const SettingsAndReviewStep = ({
               Saving...
             </>
           ) : (
-            'Save Assessment'
+            saved ? 'Saved' : 'Save Assessment'
           )}
         </Button>
       </Box>

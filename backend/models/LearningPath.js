@@ -32,8 +32,10 @@ const LearningPathSchema = new mongoose.Schema({
       min: 0,
       max: 100
     },
+    // A bare `type: String` key makes Mongoose treat the whole element as a
+    // String (so these objects failed to cast); nest it to declare a field named "type".
     recommendedResources: [{
-      type: String,
+      type: { type: String },
       resourceType: {
         type: String,
         enum: ['video', 'article', 'exercise', 'quiz']
@@ -45,7 +47,7 @@ const LearningPathSchema = new mongoose.Schema({
     concept: String,
     resources: [{
       title: String,
-      type: String,
+      type: { type: String },
       url: String,
       priority: {
         type: Number,

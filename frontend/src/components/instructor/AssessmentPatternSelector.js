@@ -29,9 +29,30 @@ import {
     Typography
 } from '@mui/material';
 import axios from 'axios';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
-const AssessmentPatternSelector = ({ 
+// Shape the custom pattern for POST /generate-questions: the backend enforces
+// `questionDistribution` ({type, count, pointsEach}); `structure` is kept for display.
+const formatCustomPattern = (customPattern) => ({
+  name: customPattern.name,
+  description: customPattern.description,
+  difficulty: customPattern.difficulty,
+  timeLimit: customPattern.timeLimit,
+  estimatedTime: customPattern.timeLimit,
+  questionDistribution: customPattern.questionDistribution,
+  structure: customPattern.questionDistribution.map(item => ({
+    questionType: item.type,
+    count: item.count,
+    pointsPerQuestion: item.pointsEach
+  })),
+  totalPoints: customPattern.questionDistribution.reduce(
+    (sum, item) => sum + (item.count * item.pointsEach), 0
+  ),
+  focusAreas: customPattern.focusAreas,
+  isCustomPattern: true
+});
+
+const AssessmentPatternSelector = ({
   courseId, 
   syllabusAnalysis, 
   onPatternSelect, 
@@ -68,94 +89,84 @@ const AssessmentPatternSelector = ({
     pointsEach: 0
   });
   
-  // Define fetchTemplates with useCallback before using it in useEffect
-  const fetchTemplates = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await axios.get(`/api/assessment/templates/${courseId || 'default'}`);
-      if (response.data.success) {
-        setTemplates(response.data.templates);
-      } else {
-        setError('Failed to load templates');
-      }
-    } catch (err) {
-      console.error('Error loading templates:', err);
-      setError('Error loading assessment templates');
-    } finally {
-      setLoading(false);
-    }
+  // Keep the latest callbacks in refs: parents often pass inline arrow functions,
+  // and depending on them in effects caused an endless select -> re-render loop.
+  const onPatternSelectRef = useRef(onPatternSelect);
+  const onCustomPatternChangeRef = useRef(onCustomPatternChange);
+  useEffect(() => {
+    onPatternSelectRef.current = onPatternSelect;
+    onCustomPatternChangeRef.current = onCustomPatternChange;
+  });
+
+  const selectPattern = (pattern) => {
+    if (onPatternSelectRef.current) onPatternSelectRef.current(pattern);
+  };
+  const notifyCustomPattern = (pattern) => {
+    if (onCustomPatternChangeRef.current) onCustomPatternChangeRef.current(pattern);
+  };
+
+  // Load templates from API (only when the course changes)
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    axios.get(`/api/assessment/templates/${courseId || 'default'}`)
+      .then(response => {
+        if (cancelled) return;
+        if (response.data?.success && Array.isArray(response.data.templates)) {
+          setTemplates(response.data.templates);
+        } else {
+          setError('Failed to load templates');
+        }
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.error('Error loading templates:', err);
+        setError('Error loading assessment templates');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [courseId]);
 
+  // Get assessment patterns from syllabus analysis
   useEffect(() => {
-    // Load templates from API
-    fetchTemplates();
-    
-    // Get assessment patterns from syllabus analysis
-    if (syllabusAnalysis && syllabusAnalysis.assessmentPatterns) {
-      setSyllabusPatterns(syllabusAnalysis.assessmentPatterns.patterns || []);
-    }
-  }, [courseId, syllabusAnalysis, fetchTemplates]);
+    const patterns = syllabusAnalysis?.assessmentPatterns?.patterns;
+    setSyllabusPatterns(Array.isArray(patterns) ? patterns : []);
+  }, [syllabusAnalysis]);
 
+  // Custom tab: keep the parent's selected pattern in sync with the editor
   useEffect(() => {
-    // Notify parent component when custom pattern changes
-    if (tabValue === 2) { // Custom tab
-      onCustomPatternChange(customPattern);
-    } else {
-      onCustomPatternChange(null);
+    if (tabValue === 2) {
+      if (onPatternSelectRef.current) onPatternSelectRef.current(formatCustomPattern(customPattern));
+      if (onCustomPatternChangeRef.current) onCustomPatternChangeRef.current(customPattern);
+    } else if (onCustomPatternChangeRef.current) {
+      onCustomPatternChangeRef.current(null);
     }
-  }, [customPattern, tabValue, onCustomPatternChange]);
+  }, [customPattern, tabValue]);
+
+  // Clear the pending "clear progress message" timer on unmount
+  const progressTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(progressTimerRef.current), []);
 
   const handleTabChange = (event, newValue) => {
     setTabValue(newValue);
-    
+
     // Reset selection when changing tabs
-    onPatternSelect(null);
+    selectPattern(null);
   };
 
   const handleTemplateSelect = (template) => {
-    onPatternSelect(template);
-    onCustomPatternChange(null);
+    selectPattern(template);
+    notifyCustomPattern(null);
   };
-
-  const handlePatternSelect = (pattern) => {
-    onPatternSelect(pattern);
-    onCustomPatternChange(null);
-  };
-
-  // Convert custom pattern to the format expected by the backend
-  useEffect(() => {
-    if (tabValue === 2) { // If custom pattern tab is selected
-      // Create a properly formatted pattern object compatible with the backend
-      const formattedCustomPattern = {
-        name: customPattern.name,
-        description: customPattern.description,
-        difficulty: customPattern.difficulty,
-        timeLimit: customPattern.timeLimit,
-        // Convert questionDistribution to structure with the expected property names
-        structure: customPattern.questionDistribution.map(item => ({
-          questionType: item.type,
-          count: item.count,
-          pointsPerQuestion: item.pointsEach
-        })),
-        // Calculate total points
-        totalPoints: customPattern.questionDistribution.reduce(
-          (sum, item) => sum + (item.count * item.pointsEach), 0
-        ),
-        // Include focus areas if specified
-        focusAreas: customPattern.focusAreas,
-        // Flag to indicate this is a custom pattern
-        isCustomPattern: true
-      };
-      
-      // Set the formatted pattern as the selected pattern
-      onPatternSelect(formattedCustomPattern);
-      onCustomPatternChange(customPattern);
-    }
-  }, [customPattern, tabValue, onPatternSelect, onCustomPatternChange]);
 
   const handleSyllabusPatternSelect = (pattern) => {
-    onPatternSelect(pattern);
-    onCustomPatternChange(null);
+    selectPattern(pattern);
+    notifyCustomPattern(null);
   };
 
   const handleCustomPatternChange = (field, value) => {
@@ -205,6 +216,12 @@ const AssessmentPatternSelector = ({
       ...prev,
       questionDistribution: updatedDistribution
     }));
+    // Deleting the row being edited (or one before it) invalidates editingIndex
+    if (isEditing && index <= editingIndex) {
+      setIsEditing(false);
+      setEditingIndex(-1);
+      setEditingItem({ type: "multiple-choice", count: 0, pointsEach: 0 });
+    }
   };
 
   const handleEditingItemChange = (field, value) => {
@@ -236,15 +253,17 @@ const AssessmentPatternSelector = ({
       setProgressInfo('Using optimized model for faster quiz generation...');
       
       // Select this pattern
-      onPatternSelect(quickPattern);
-      
+      selectPattern(quickPattern);
+      notifyCustomPattern(null);
+
       setProgressInfo('Quiz pattern ready! Click "Generate Assessment" to create your quick quiz.');
     } catch (error) {
       console.error('Error generating quick quiz:', error);
       setError('Failed to generate quick quiz. Please try a different pattern.');
     } finally {
       setQuickQuizLoading(false);
-      setTimeout(() => setProgressInfo(''), 5000); // Clear progress message after 5 seconds
+      clearTimeout(progressTimerRef.current);
+      progressTimerRef.current = setTimeout(() => setProgressInfo(''), 5000); // Clear progress message after 5 seconds
     }
   };
 
@@ -295,11 +314,11 @@ const AssessmentPatternSelector = ({
                   <strong>Time:</strong> {template.timeLimit} minutes
                 </Typography>
                 <Typography variant="body2">
-                  <strong>Questions:</strong> {template.questionDistribution.reduce((sum, item) => sum + item.count, 0)}
+                  <strong>Questions:</strong> {(template.questionDistribution || []).reduce((sum, item) => sum + item.count, 0)}
                 </Typography>
-                
+
                 <Box sx={{ mt: 2 }}>
-                  {template.questionDistribution.map((item, i) => (
+                  {(template.questionDistribution || []).map((item, i) => (
                     <Typography variant="body2" key={i}>
                       • {item.count} {item.type} ({item.pointsEach} {item.pointsEach === 1 ? 'point' : 'points'} each)
                     </Typography>
@@ -354,7 +373,7 @@ const AssessmentPatternSelector = ({
                 </Typography>
                 
                 <Box sx={{ mt: 2 }}>
-                  {pattern.structure.map((item, i) => (
+                  {(pattern.structure || []).map((item, i) => (
                     <Typography variant="body2" key={i}>
                       • {item.count} {item.questionType} ({item.pointsPerQuestion} {item.pointsPerQuestion === 1 ? 'point' : 'points'} each)
                     </Typography>

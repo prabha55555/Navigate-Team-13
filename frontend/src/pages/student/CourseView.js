@@ -25,6 +25,7 @@ import {
     Tabs,
     Typography
 } from '@mui/material';
+import axios from 'axios';
 import React, { useEffect, useState } from 'react';
 import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom';
 
@@ -184,6 +185,60 @@ const mockCourse = {
   }
 };
 
+const sumPoints = (questions) =>
+  (Array.isArray(questions) ? questions : []).reduce(
+    (sum, q) => sum + (Number(q.points || q.pointsPerQuestion) || 1),
+    0
+  );
+
+// Map an assessment from GET /api/student/assessment/upcoming to the card format below
+const toCourseAssessment = (assessment) => ({
+  id: assessment.id || assessment._id,
+  title: assessment.title || 'Untitled Assessment',
+  type: assessment.visibility?.pattern?.name || 'Assessment',
+  dueDate: assessment.dueDate,
+  status: assessment.status === 'completed' ? 'completed' : 'available',
+  timeLimit: assessment.timeLimit,
+  totalPoints: assessment.totalPoints ?? sumPoints(assessment.questions),
+  visibility: assessment.visibility,
+  studentSubmission: assessment.studentSubmission,
+  raw: assessment
+});
+
+// Course details from GET /api/curriculum/courses/:id (units/lessons) in this page's shape
+const fromApiCourse = (courseId, apiCourse) => {
+  const units = Array.isArray(apiCourse.units) ? apiCourse.units : [];
+  return {
+    id: courseId,
+    title: apiCourse.title,
+    description: apiCourse.description,
+    code: apiCourse.code,
+    department: apiCourse.department,
+    credits: apiCourse.credits,
+    level: apiCourse.level,
+    instructor: apiCourse.instructorName || apiCourse.instructor?.name,
+    term: apiCourse.term,
+    assessments: [],
+    materials: units.flatMap((unit, unitIndex) =>
+      (Array.isArray(unit.lessons) ? unit.lessons : []).map((lesson, lessonIndex) => ({
+        id: `${unitIndex}-${lessonIndex}`,
+        title: lesson.title,
+        type: lesson.type,
+        week: unitIndex + 1,
+        url: lesson.url
+      }))
+    ),
+    syllabus: {
+      learningOutcomes: Array.isArray(apiCourse.learningOutcomes) ? apiCourse.learningOutcomes : (apiCourse.topics || []),
+      weeklyTopics: units.map((unit, unitIndex) => ({
+        week: unitIndex + 1,
+        topic: unit.title,
+        description: (Array.isArray(unit.lessons) ? unit.lessons : []).map((lesson) => lesson.title).join(', ')
+      }))
+    }
+  };
+};
+
 const CourseView = () => {
   const { courseId } = useParams();
   const navigate = useNavigate();
@@ -192,13 +247,52 @@ const CourseView = () => {
   const [activeTab, setActiveTab] = useState(0);
   // Load course data
   useEffect(() => {
+    let cancelled = false;
+
     const fetchCourseData = async () => {
       setLoading(true);
-      try {
-        // In a real application, you would fetch the course from an API
-        // For this demo, we'll start with the mock data
-        let courseData = { ...mockCourse };
+      const token = localStorage.getItem('token');
+      const config = { headers: { 'x-auth-token': token } };
+      const [courseResult, assessmentsResult] = await Promise.allSettled([
+        axios.get(`/api/curriculum/courses/${courseId}`, config),
+        axios.get('/api/student/assessment/upcoming', config)
+      ]);
+      if (cancelled) return;
         
+      const apiCourse = courseResult.status === 'fulfilled' ? courseResult.value.data?.course : null;
+      const assessmentData = assessmentsResult.status === 'fulfilled' ? assessmentsResult.value.data : null;
+      const apiAssessments = assessmentData?.success && Array.isArray(assessmentData.assessments)
+        ? assessmentData.assessments.filter(
+          (a) => a && String(a.course?._id ?? a.courseId) === String(courseId)
+        )
+        : null;
+
+      let courseData;
+      if (apiCourse) {
+        courseData = fromApiCourse(courseId, apiCourse);
+      } else if (String(courseId) === mockCourse.id) {
+        // Demo content for the default course
+        courseData = { ...mockCourse };
+      } else if (apiAssessments && apiAssessments.length > 0) {
+        courseData = {
+          id: courseId,
+          title: apiAssessments[0].course?.title || apiAssessments[0].courseName || 'Course',
+          description: '',
+          assessments: [],
+          materials: [],
+          syllabus: { learningOutcomes: [], weeklyTopics: [] }
+        };
+      } else {
+        setCourse(null);
+        setLoading(false);
+        return;
+      }
+
+      if (apiAssessments) {
+        // Real assessments replace the demo list so "Start Assessment" opens ones that exist
+        courseData = { ...courseData, assessments: apiAssessments.map(toCourseAssessment) };
+      } else {
+        console.warn('Assessment API fetch failed, using localStorage fallback:', assessmentsResult.reason || assessmentData);
         // Try to get assessments from localStorage
         try {
           const savedAssessmentsString = localStorage.getItem('savedAssessments');
@@ -233,17 +327,52 @@ const CourseView = () => {
         } catch (storageError) {
           console.error('Error accessing localStorage:', storageError);
         }
-        
-        setCourse(courseData);
-      } catch (error) {
-        console.error('Error fetching course data:', error);
-      } finally {
-        setLoading(false);
       }
+        
+      const assessments = courseData.assessments || [];
+      const completed = assessments.filter((a) => a.status === 'completed').length;
+      setCourse({
+        ...courseData,
+        assessments,
+        materials: courseData.materials || [],
+        syllabus: {
+          learningOutcomes: courseData.syllabus?.learningOutcomes || [],
+          weeklyTopics: courseData.syllabus?.weeklyTopics || []
+        },
+        progress: {
+          ...(courseData.progress || {}),
+          completedAssessments: apiAssessments ? completed : (courseData.progress?.completedAssessments ?? completed),
+          totalAssessments: apiAssessments ? assessments.length : (courseData.progress?.totalAssessments ?? assessments.length)
+        }
+      });
+      setLoading(false);
     };
     
-    fetchCourseData();
+    fetchCourseData().catch((error) => {
+      if (cancelled) return;
+      console.error('Error fetching course data:', error);
+      setCourse(null);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [courseId]);
+
+  const viewResults = (assessment) => {
+    const submission = assessment.studentSubmission || {};
+    navigate(`/results/${submission.id || submission.submissionId || 'temp'}`, {
+      state: {
+        score: submission.score ?? 0,
+        maxScore: submission.maxScore,
+        percentage: submission.percentage,
+        isPassed: submission.isPassed,
+        submittedAt: submission.submittedAt,
+        assessment: assessment.raw || assessment
+      }
+    });
+  };
 
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
@@ -289,7 +418,9 @@ const CourseView = () => {
               {course.title}
             </Typography>
             <Typography variant="subtitle1" color="text.secondary" gutterBottom>
-              {course.code} • {course.department} • {course.credits} Credits
+              {[course.code, course.department, course.credits ? `${course.credits} Credits` : null, course.level]
+                .filter(Boolean)
+                .join(' • ')}
             </Typography>
             <Typography variant="body1" paragraph>
               {course.description}
@@ -301,13 +432,13 @@ const CourseView = () => {
                 <ListItemIcon>
                   <PersonIcon />
                 </ListItemIcon>
-                <ListItemText primary="Instructor" secondary={course.instructor} />
+                <ListItemText primary="Instructor" secondary={course.instructor || '—'} />
               </ListItem>
               <ListItem>
                 <ListItemIcon>
                   <CalendarTodayIcon />
                 </ListItemIcon>
-                <ListItemText primary="Term" secondary={course.term} />
+                <ListItemText primary="Term" secondary={course.term || '—'} />
               </ListItem>
               <ListItem>
                 <ListItemIcon>
@@ -354,6 +485,15 @@ const CourseView = () => {
           Assessments
         </Typography>
         <Grid container spacing={3}>
+          {course.assessments.length === 0 && (
+            <Grid item xs={12}>
+              <Paper sx={{ p: 3, textAlign: 'center' }}>
+                <Typography color="text.secondary">
+                  No assessments have been assigned for this course yet.
+                </Typography>
+              </Paper>
+            </Grid>
+          )}
           {course.assessments.map((assessment) => (
             <Grid item xs={12} sm={6} md={4} key={assessment.id}>
               <Card 
@@ -371,8 +511,8 @@ const CourseView = () => {
                       {assessment.title}
                     </Typography>
                     <Chip 
-                      label={assessment.status === 'available' ? 'Available' : 'Upcoming'} 
-                      color={assessment.status === 'available' ? 'primary' : 'default'}
+                      label={assessment.status === 'available' ? 'Available' : assessment.status === 'completed' ? 'Completed' : 'Upcoming'}
+                      color={assessment.status === 'available' ? 'primary' : assessment.status === 'completed' ? 'success' : 'default'}
                       size="small"
                     />                  </Box>
                   <Typography variant="body2" color="text.secondary" gutterBottom>
@@ -389,7 +529,7 @@ const CourseView = () => {
                   <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, mb: 2 }}>
                     <CalendarTodayIcon fontSize="small" sx={{ mr: 1, color: 'text.secondary' }} />
                     <Typography variant="body2" color="text.secondary">
-                      Due: {new Date(assessment.dueDate).toLocaleDateString()}
+                      Due: {assessment.dueDate ? new Date(assessment.dueDate).toLocaleDateString() : 'No due date'}
                     </Typography>
                   </Box>
                   <List dense>
@@ -405,20 +545,30 @@ const CourseView = () => {
                       <ListItemIcon sx={{ minWidth: 36 }}>
                         <CheckCircleIcon fontSize="small" />
                       </ListItemIcon>
-                      <ListItemText primary={`Points: ${assessment.totalPoints}`} />
+                      <ListItemText primary={`Points: ${assessment.totalPoints ?? '—'}`} />
                     </ListItem>
                   </List>
                 </CardContent>
                 <Box sx={{ p: 2, pt: 0 }}>
-                  <Button 
-                    variant="contained" 
-                    fullWidth
-                    component={RouterLink}
-                    to={`/assessment/${assessment.id}`}
-                    disabled={assessment.status !== 'available'}
-                  >
-                    {assessment.status === 'available' ? 'Start Assessment' : 'Coming Soon'}
-                  </Button>
+                  {assessment.status === 'completed' ? (
+                    <Button
+                      variant="outlined"
+                      fullWidth
+                      onClick={() => viewResults(assessment)}
+                    >
+                      View Results
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="contained"
+                      fullWidth
+                      component={RouterLink}
+                      to={`/assessment/${assessment.id}`}
+                      disabled={assessment.status !== 'available'}
+                    >
+                      {assessment.status === 'available' ? 'Start Assessment' : 'Coming Soon'}
+                    </Button>
+                  )}
                 </Box>
               </Card>
             </Grid>
@@ -444,6 +594,8 @@ const CourseView = () => {
                 </ListItemIcon>
                 <ListItemText 
                   primary={material.title}
+                  // The chips are block content; the default <p> wrapper would be invalid DOM nesting
+                  secondaryTypographyProps={{ component: 'div' }}
                   secondary={
                     <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
                       <Chip 
@@ -467,6 +619,9 @@ const CourseView = () => {
                   component="a" 
                   href={material.url}
                   target="_blank"
+                  rel="noopener noreferrer"
+                  // '#' placeholders would just open the app again in a new tab
+                  disabled={!material.url || material.url === '#'}
                 >
                   View
                 </Button>
@@ -474,6 +629,9 @@ const CourseView = () => {
             </React.Fragment>
           ))}
         </List>
+        {course.materials.length === 0 && (
+          <Typography color="text.secondary">No course materials have been published yet.</Typography>
+        )}
       </Box>
 
       {/* Syllabus Tab */}

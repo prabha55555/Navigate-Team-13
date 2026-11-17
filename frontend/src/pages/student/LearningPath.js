@@ -30,46 +30,94 @@ import {
 } from '@mui/material';
 import axios from 'axios';
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 
 const LearningPath = () => {
   const { courseId } = useParams();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [learningPath, setLearningPath] = useState(null);
   const [course, setCourse] = useState(null);
+  const [assessments, setAssessments] = useState(null);
   const [tabValue, setTabValue] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+
     const fetchLearningPath = async () => {
-      try {
-        setLoading(true);
+      setLoading(true);
+      setError('');
+      const config = { headers: { 'x-auth-token': localStorage.getItem('token') } };
         
-        // Fetch learning path data
-        const learningPathRes = await axios.get(`/api/adaptive-learning/${courseId}`);
-        setLearningPath(learningPathRes.data.learningPath);
+      // Only the learning path is required; course details and assessments are optional extras.
+      const [learningPathResult, courseResult, assessmentsResult] = await Promise.allSettled([
+        axios.get(`/api/adaptive-learning/${courseId}`, config),
+        axios.get(`/api/curriculum/courses/${courseId}`, config),
+        axios.get('/api/student/assessment/upcoming', config)
+      ]);
+      if (cancelled) return;
         
-        // Fetch course data
-        const courseRes = await axios.get(`/api/courses/${courseId}`);
-        setCourse(courseRes.data.course);
-        
-        setLoading(false);
-      } catch (err) {
+      if (learningPathResult.status === 'rejected') {
+        const err = learningPathResult.reason;
         console.error('Error fetching learning path:', err);
         setError(err.response?.data?.message || 'Error loading your learning path');
         setLoading(false);
+        return;
       }
+      setLearningPath(learningPathResult.value.data?.learningPath || null);
+
+      const courseAssessments = assessmentsResult.status === 'fulfilled' &&
+        Array.isArray(assessmentsResult.value.data?.assessments)
+        ? assessmentsResult.value.data.assessments.filter(
+          (a) => a && String(a.course?._id ?? a.courseId) === String(courseId)
+        )
+        : null;
+      setAssessments(courseAssessments);
+
+      const apiCourse = courseResult.status === 'fulfilled' ? courseResult.value.data?.course : null;
+      const assessmentCourse = courseAssessments?.[0]?.course;
+      setCourse(apiCourse || (assessmentCourse ? { _id: assessmentCourse._id, title: assessmentCourse.title } : null));
+      setLoading(false);
     };
     
-    fetchLearningPath();
+    fetchLearningPath().catch((err) => {
+      if (cancelled) return;
+      console.error('Error fetching learning path:', err);
+      setError('Error loading your learning path');
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [courseId]);
 
   const handleTabChange = (event, newValue) => {
     setTabValue(newValue);
   };
 
+  // The backend "next-assessment" route redirects to a non-existent mock id and needs an
+  // auth header a full page navigation can't send, so pick the next open assessment here.
+  const nextAssessment = assessments?.find((a) => a.status === 'available');
+  const handleTakeRecommended = () => {
+    if (nextAssessment) {
+      navigate(`/assessment/${nextAssessment.id || nextAssessment._id}`);
+    } else {
+      navigate(`/course/${courseId}`);
+    }
+  };
+
+  const completedFromHistory = learningPath?.progressHistory?.reduce(
+    (acc, entry) => acc + (entry.assessmentsCompleted?.length || 0),
+    0
+  ) || 0;
+  const completedCount = assessments
+    ? assessments.filter((a) => a.status === 'completed').length
+    : completedFromHistory;
+
   const getResourceIcon = (type) => {
-    switch (type.toLowerCase()) {
+    switch (String(type || '').toLowerCase()) {
       case 'video':
         return <VideoIcon color="primary" />;
       case 'article':
@@ -160,7 +208,7 @@ const LearningPath = () => {
               <Box sx={{ textAlign: 'center' }}>
                 <Typography variant="h6">Assessments Completed</Typography>
                 <Typography variant="h4" color="primary" sx={{ mt: 1 }}>
-                  {learningPath?.progressHistory?.reduce((acc, entry) => acc + entry.assessmentsCompleted.length, 0) || 0}
+                  {completedCount}
                 </Typography>
               </Box>
             </Grid>
@@ -194,7 +242,7 @@ const LearningPath = () => {
                         
                         <Typography variant="subtitle1" gutterBottom>Suggested Resources:</Typography>
                         <List dense>
-                          {recommendation.resources.map((resource, resourceIndex) => (
+                          {(recommendation.resources || []).map((resource, resourceIndex) => (
                             <ListItem key={resourceIndex}>
                               <ListItemIcon>
                                 {getResourceIcon(resource.type)}
@@ -212,7 +260,7 @@ const LearningPath = () => {
                         
                         <Typography variant="subtitle1" gutterBottom sx={{ mt: 2 }}>Learning Activities:</Typography>
                         <List dense>
-                          {recommendation.suggestedActivities.map((activity, activityIndex) => (
+                          {(recommendation.suggestedActivities || []).map((activity, activityIndex) => (
                             <ListItem key={activityIndex}>
                               <ListItemIcon>
                                 <TrendingUpIcon color="secondary" />
@@ -306,7 +354,9 @@ const LearningPath = () => {
                                 <ListItemText 
                                   primary={
                                     <Link href={resource.url} target="_blank" rel="noopener">
-                                      {resource.resourceType.charAt(0).toUpperCase() + resource.resourceType.slice(1)} Resource
+                                      {resource.resourceType
+                                        ? `${resource.resourceType.charAt(0).toUpperCase()}${resource.resourceType.slice(1)} Resource`
+                                        : 'Resource'}
                                     </Link>
                                   }
                                 />
@@ -338,9 +388,9 @@ const LearningPath = () => {
           color="primary"
           size="large"
           sx={{ mt: 2 }}
-          onClick={() => window.location.href = `/api/adaptive-learning/next-assessment/${courseId}`}
+          onClick={handleTakeRecommended}
         >
-          Take Recommended Assessment
+          {nextAssessment || !assessments ? 'Take Recommended Assessment' : 'View Course Assessments'}
         </Button>
       </Box>
     </>

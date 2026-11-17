@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/auth');
+const assessmentStore = require('../services/assessmentStore');
 
 // Mock data for demonstration purposes
 const learningPaths = {};
@@ -91,8 +92,17 @@ router.post('/:courseId', authMiddleware, (req, res) => {
   try {
     const { courseId } = req.params;
     const userId = req.user.id;
-    const { assessmentResults } = req.body;
-    
+    // Accept { assessmentResults: { assessmentId } } or a top-level assessmentId;
+    // a missing body used to throw a TypeError and return 500.
+    const assessmentResults = req.body && typeof req.body.assessmentResults === 'object' && req.body.assessmentResults
+      ? req.body.assessmentResults
+      : {};
+    const assessmentId = assessmentResults.assessmentId || (req.body && req.body.assessmentId);
+
+    if (!assessmentId) {
+      return res.status(400).json({ success: false, message: 'assessmentResults.assessmentId is required' });
+    }
+
     // Get existing learning path or create new
     const pathKey = `${userId}-${courseId}`;
     const existingPath = learningPaths[pathKey] || {
@@ -118,7 +128,7 @@ router.post('/:courseId', authMiddleware, (req, res) => {
           ? existingPath.progressHistory[existingPath.progressHistory.length - 1].overallProgress 
           : 0) + 15
       ),
-      assessmentsCompleted: [assessmentResults.assessmentId]
+      assessmentsCompleted: [assessmentId]
     });
     
     // Save updated learning path
@@ -134,17 +144,36 @@ router.post('/:courseId', authMiddleware, (req, res) => {
   }
 });
 
+// The learning-path page opens this URL with window.location (a plain browser
+// navigation), which cannot send the x-auth-token header, so requiring auth
+// made the button always fail with 401. Auth is applied only when a token is
+// sent; the route itself just redirects to an assessment page.
+const optionalAuth = (req, res, next) =>
+  (req.header('x-auth-token') || req.header('authorization') ? authMiddleware(req, res, next) : next());
+
 // @route   GET api/adaptive-learning/next-assessment/:courseId
 // @desc    Get recommended next assessment for a student
-// @access  Private
-router.get('/next-assessment/:courseId', authMiddleware, (req, res) => {
+// @access  Public (optional auth)
+router.get('/next-assessment/:courseId', optionalAuth, (req, res) => {
   try {
     const { courseId } = req.params;
-    
-    // In a real application, this would use AI to determine the next best assessment
-    // For demo purposes, we'll just return a redirect to a mock assessment
-    
-    res.redirect(`/assessment/mock-assessment-id`);
+    const userId = req.user && req.user.id;
+
+    // Recommend an assessment the student can actually open: prefer this course,
+    // then anything available; skip ones already completed when we know the user.
+    // (Previously this redirected to the non-existent 'mock-assessment-id'.)
+    const completed = new Set(
+      userId
+        ? assessmentStore.getSubmissions()
+          .filter(s => String(s.studentId) === String(userId))
+          .map(s => String(s.assessmentId))
+        : []
+    );
+    const available = assessmentStore.getAssessments()
+      .filter(a => assessmentStore.isVisibleToStudents(a, userId) && !completed.has(String(a.id)));
+    const next = available.find(a => String(a.courseId) === String(courseId)) || available[0];
+
+    res.redirect(next ? `/assessment/${encodeURIComponent(next.id)}` : '/dashboard');
   } catch (err) {
     console.error('Error getting next assessment:', err);
     res.status(500).json({ success: false, message: 'Server error' });

@@ -174,8 +174,11 @@ const SubmissionSchema = new Schema({
 });
 
 // Create models
-const Assessment = mongoose.model('Assessment', AssessmentSchema);
-const Submission = mongoose.model('Submission', SubmissionSchema);
+// models/Submission.js also registers a 'Submission' model with a different
+// schema; registering the same name twice throws OverwriteModelError as soon
+// as both files are loaded, so this one gets its own model name.
+const Assessment = mongoose.models.Assessment || mongoose.model('Assessment', AssessmentSchema);
+const Submission = mongoose.models.AssessmentSubmission || mongoose.model('AssessmentSubmission', SubmissionSchema);
 
 module.exports = {
   Assessment,

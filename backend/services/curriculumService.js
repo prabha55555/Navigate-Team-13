@@ -5,8 +5,14 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 // Initialize Gemini API if API key is available
+// Shared model selection: skips retired models (the configured gemini-2.0-flash
+// now 404s) and falls back to currently available ones.
+const geminiModels = require('../../ai_services/models/geminiModels');
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const GEMINI_MODEL = geminiModels.candidateModels(process.env.GEMINI_MODEL)[0];
+// Without a timeout a stalled Gemini call held the HTTP request open indefinitely
+const GEMINI_TIMEOUT_MS = 25000;
 let genAI = null;
 let model = null;
 
@@ -14,7 +20,31 @@ let model = null;
 if (GEMINI_API_KEY && GEMINI_API_KEY !== 'your-api-key-here') {
   try {
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+    // Same generateContent interface as the SDK model, but moves on to the next
+    // candidate model when Gemini reports one as retired/unknown.
+    model = {
+      generateContent: async (request) => {
+        let lastError;
+        for (const name of geminiModels.candidateModels(process.env.GEMINI_MODEL)) {
+          try {
+            return await genAI
+              .getGenerativeModel({ model: name }, { timeout: GEMINI_TIMEOUT_MS })
+              .generateContent(request);
+          } catch (error) {
+            lastError = error;
+            if (geminiModels.isModelUnavailableError(error.status, error.message)) {
+              geminiModels.markUnavailable(name);
+              continue;
+            }
+            if (geminiModels.isTryNextModelError(error.status)) {
+              continue; // rate limited / overloaded: try a model with its own quota
+            }
+            throw error;
+          }
+        }
+        throw lastError || new Error('No Gemini model available');
+      }
+    };
     console.log('Gemini AI initialized successfully with model:', GEMINI_MODEL);
   } catch (error) {
     console.error('Failed to initialize Gemini AI:', error);
@@ -374,6 +404,49 @@ const simulateCurriculumGeneration = (courseTitle, courseDescription) => {
   };
 };
 
+const BLOOM_LEVELS = ['Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'];
+const COMPETENCY_LEVELS = ['Introductory', 'Core', 'Advanced'];
+
+/**
+ * Validate learning outcomes parsed from a model response. Accepts an array
+ * or an object wrapping one ({ learningOutcomes: [...] }); returns null when
+ * nothing usable is present so callers can fall back to templates.
+ */
+const sanitizeOutcomes = (value) => {
+  const list = Array.isArray(value)
+    ? value
+    : (value && typeof value === 'object' && Array.isArray(value.learningOutcomes) ? value.learningOutcomes : null);
+  if (!list) return null;
+  const outcomes = list
+    .filter(o => o && typeof o === 'object' && typeof o.text === 'string' && o.text.trim())
+    .map(o => ({
+      text: o.text.trim(),
+      bloom: BLOOM_LEVELS.find(b => b.toLowerCase() === String(o.bloom || '').trim().toLowerCase()) || 'Understand',
+      competency: COMPETENCY_LEVELS.find(c => c.toLowerCase() === String(o.competency || '').trim().toLowerCase()) || 'Core'
+    }));
+  return outcomes.length > 0 ? outcomes : null;
+};
+
+/**
+ * Parse JSON out of a Gemini text response (plain JSON, fenced or embedded).
+ */
+const parseModelJson = (text) => {
+  const candidates = [
+    text,
+    (text.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/) || [])[1],
+    (text.match(/(\[[\s\S]*\])/) || [])[1],
+    (text.match(/({[\s\S]*})/) || [])[1]
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch (e) {
+      // try the next candidate
+    }
+  }
+  return undefined;
+};
+
 /**
  * Generate a curriculum map using Google's Gemini API
  * @param {string} courseTitle - The title of the course
@@ -424,19 +497,20 @@ const generateCurriculumMap = async (courseTitle, courseDescription) => {
       topP: 0.8,
       topK: 40,
       maxOutputTokens: 2048,
+      responseMimeType: 'application/json',
     };
-    
+
     // Get response from Gemini
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig,
     });
-    
+
     const response = await result.response;
     const text = response.text();
-    
+
     // Extract the JSON part from the response
-    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```\n([\s\S]*?)\n```/) || text.match(/({[\s\S]*})/) || [null, text];
+    const jsonMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/) || text.match(/({[\s\S]*})/) || [null, text];
     
     let parsedResponse;
     try {
@@ -455,16 +529,23 @@ const generateCurriculumMap = async (courseTitle, courseDescription) => {
       return simulateCurriculumGeneration(courseTitle, courseDescription);
     }
     
+    if (!parsedResponse || typeof parsedResponse !== 'object' ||
+        !Array.isArray(parsedResponse.topics) || parsedResponse.topics.length === 0) {
+      console.warn('Gemini returned no usable topics; using simulation mode');
+      return simulateCurriculumGeneration(courseTitle, courseDescription);
+    }
+
     // Format topics with appropriate icons
-    const topicsWithIcons = formatTopicsWithIcons(parsedResponse.topics || []);
-    
+    const topicsWithIcons = formatTopicsWithIcons(parsedResponse.topics.filter(t => typeof t === 'string'));
+
     // Process and return the curriculum map
     return {
       topics: topicsWithIcons,
-      learningOutcomes: parsedResponse.learningOutcomes || []
+      learningOutcomes: sanitizeOutcomes(parsedResponse.learningOutcomes) ||
+        simulateCurriculumGeneration(courseTitle, courseDescription).learningOutcomes
     };
   } catch (error) {
-    console.error('Error calling Gemini API:', error);
+    console.error('Error calling Gemini API:', error.message);
     // Fallback to simulation mode on error
     return simulateCurriculumGeneration(courseTitle, courseDescription);
   }
@@ -478,9 +559,80 @@ const generateCurriculumMap = async (courseTitle, courseDescription) => {
  * @returns {Object} Object with generated learning outcomes
  */
 const generateLearningOutcomes = async (courseTitle, courseDescription, topics) => {
-  // Implementation of learning outcomes generation
-  // This can use Gemini similar to curriculum map generation
-  // ...
+  // This was an empty stub that returned undefined, so POST
+  // /api/curriculum/generate-outcomes always answered { learningOutcomes: undefined }.
+  const topicNames = (Array.isArray(topics) ? topics : [])
+    .map(t => (typeof t === 'string' ? t : (t && (t.name || t.title)) || ''))
+    .map(t => String(t).trim())
+    .filter(Boolean);
+
+  // Template outcomes, tailored with the given topics when there is no model
+  const fallback = () => {
+    const base = simulateCurriculumGeneration(courseTitle, courseDescription).learningOutcomes;
+    const topicOutcomes = topicNames.slice(0, 3).map((topic, i) => ({
+      text: [
+        `Explain the core principles of ${topic}`,
+        `Apply ${topic} techniques to solve practical problems`,
+        `Analyze and evaluate approaches related to ${topic}`
+      ][i],
+      bloom: ['Understand', 'Apply', 'Analyze'][i],
+      competency: ['Introductory', 'Core', 'Advanced'][i]
+    }));
+    return [...topicOutcomes, ...base].slice(0, 7);
+  };
+
+  try {
+    console.log(`Generating learning outcomes for "${courseTitle}" from ${topicNames.length} topics using ${model ? 'Gemini API' : 'simulation mode'}`);
+    if (!model) {
+      return fallback();
+    }
+
+    const prompt = `
+    You are an expert curriculum designer for higher education. Create learning outcomes for a course titled "${courseTitle}".
+    ${courseDescription ? `The course description is: "${courseDescription}"` : ''}
+
+    The course covers these topics: ${topicNames.join(', ')}
+
+    Generate 5-7 learning outcomes that together cover these topics.
+
+    For each learning outcome:
+    - Write a clear, measurable outcome statement starting with an action verb
+    - Assign a Bloom's Taxonomy level (Remember, Understand, Apply, Analyze, Evaluate, Create)
+    - Assign a competency level (Introductory, Core, Advanced)
+
+    Format your response as a valid JSON array with this exact structure:
+    [
+      {
+        "text": "Complete learning outcome statement",
+        "bloom": "One of: Remember, Understand, Apply, Analyze, Evaluate, Create",
+        "competency": "One of: Introductory, Core, Advanced"
+      }
+    ]
+
+    Ensure your response is only the JSON array, nothing else.
+    `;
+
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.7,
+        topP: 0.8,
+        topK: 40,
+        maxOutputTokens: 2048,
+        responseMimeType: 'application/json',
+      },
+    });
+    const text = result.response.text();
+    const outcomes = sanitizeOutcomes(parseModelJson(text));
+    if (!outcomes) {
+      console.warn('Could not parse learning outcomes from Gemini response; using templates');
+      return fallback();
+    }
+    return outcomes;
+  } catch (error) {
+    console.error('Error generating learning outcomes:', error.message);
+    return fallback();
+  }
 };
 
 /**
@@ -719,91 +871,31 @@ const generateLearningOutcomesFromDescription = async (courseTitle, courseDescri
       topP: 0.8,
       topK: 40,
       maxOutputTokens: 2048,
+      responseMimeType: 'application/json',
     };
-    
+
     // Get response from Gemini
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig,
     });
-    
+
     const response = await result.response;
     const text = response.text();
-    
-    // Extract the JSON part from the response
-    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```\n([\s\S]*?)\n```/) || text.match(/(\[[\s\S]*\])/) || [null, text];
-    
-    let parsedResponse;
-    try {
-      // Try to parse the entire text first
-      try {
-        parsedResponse = JSON.parse(text);
-      } catch {
-        // If that fails, try to parse the extracted part
-        parsedResponse = JSON.parse(jsonMatch[1] || text);
-      }
-    } catch (error) {
-      console.error('Error parsing Gemini response for learning outcomes:', error);
-      console.log('Raw response:', text);
-      
-      // Fallback to default learning outcomes if parsing fails
-      const title = courseTitle.toLowerCase();
-      let subjectArea = 'default';
-      
-      // Check for common subject areas in the title
-      if (title.includes('data structure') || title.includes('algorithm')) {
-        subjectArea = 'data structures';
-      } else if (title.includes('programming') || title.includes('coding')) {
-        subjectArea = 'programming';
-      } else if (title.includes('web') || title.includes('frontend') || title.includes('backend')) {
-        subjectArea = 'web development';
-      } else if (title.includes('database') || title.includes('sql')) {
-        subjectArea = 'database';
-      } else if (title.includes('machine learning') || title.includes('ai') || title.includes('artificial intelligence')) {
-        subjectArea = 'machine learning';
-      }
-      
-      const templates = {
-        'data structures': [
-          // ...outcomes as defined above...
-        ],
-        // ...other templates as defined above...
-        'default': [
-          {
-            text: 'Understand fundamental concepts in the subject area',
-            bloom: 'Understand',
-            competency: 'Introductory'
-          },
-          {
-            text: 'Apply theoretical knowledge to practical scenarios',
-            bloom: 'Apply',
-            competency: 'Core'
-          },
-          {
-            text: 'Analyze problems using appropriate techniques and methods',
-            bloom: 'Analyze',
-            competency: 'Core'
-          },
-          {
-            text: 'Evaluate solutions using established criteria',
-            bloom: 'Evaluate',
-            competency: 'Advanced'
-          },
-          {
-            text: 'Create innovative solutions to complex problems',
-            bloom: 'Create',
-            competency: 'Advanced'
-          }
-        ]
-      };
-      
-      return templates[subjectArea] || templates['default'];
+
+    // Parse and validate; the old parse-failure fallback returned an EMPTY array
+    // for "data structures" courses (its template was a placeholder comment) and
+    // non-array JSON was passed straight through to the frontend's .map().
+    const outcomes = sanitizeOutcomes(parseModelJson(text));
+    if (!outcomes) {
+      console.error('Error parsing Gemini response for learning outcomes; using templates');
+      return simulateCurriculumGeneration(courseTitle, courseDescription).learningOutcomes;
     }
-    
+
     // Return the array of learning outcomes
-    return parsedResponse;
+    return outcomes;
   } catch (error) {
-    console.error('Error generating learning outcomes from description:', error);
+    console.error('Error generating learning outcomes from description:', error.message);
     // Return default learning outcomes on error
     return [
       {

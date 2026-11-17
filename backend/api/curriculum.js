@@ -67,13 +67,67 @@ const courses = [
       }
     ],
     createdAt: new Date()
+  },
+  // Courses '1' and '2' match the course ids used by the seeded/saved
+  // assessments and the student dashboard, so course and learning-path
+  // pages resolve instead of 404ing.
+  {
+    _id: '1',
+    title: 'Data Structures and Algorithms in Java',
+    description: 'Introduction to fundamental data structures and algorithms used in computer science, implemented in Java.',
+    instructor: 'instructor-id-1',
+    topics: ['Arrays', 'Linked Lists', 'Stacks and Queues', 'Trees', 'Hashing', 'Sorting Algorithms'],
+    level: 'intermediate',
+    progress: 65,
+    units: [
+      {
+        title: 'Linear Data Structures',
+        lessons: [
+          { title: 'Arrays and ArrayList', type: 'video', completed: true },
+          { title: 'Linked Lists', type: 'reading', completed: true },
+          { title: 'Stacks and Queues', type: 'interactive', completed: false }
+        ]
+      },
+      {
+        title: 'Trees and Hashing',
+        lessons: [
+          { title: 'Binary Search Trees', type: 'video', completed: false },
+          { title: 'HashMap Internals', type: 'reading', completed: false }
+        ]
+      }
+    ],
+    createdAt: new Date()
+  },
+  {
+    _id: '2',
+    title: 'Web Development',
+    description: 'Learn modern web development techniques using React, Node.js, and related technologies.',
+    instructor: 'instructor-id-1',
+    topics: ['HTML', 'CSS', 'JavaScript', 'React', 'Node.js'],
+    level: 'beginner',
+    progress: 40,
+    units: [
+      {
+        title: 'Frontend Foundations',
+        lessons: [
+          { title: 'HTML and CSS Refresher', type: 'video', completed: true },
+          { title: 'Modern JavaScript', type: 'reading', completed: false }
+        ]
+      },
+      {
+        title: 'Full-Stack Basics',
+        lessons: [
+          { title: 'React Components', type: 'interactive', completed: false },
+          { title: 'Building APIs with Express', type: 'video', completed: false }
+        ]
+      }
+    ],
+    createdAt: new Date()
   }
 ];
 
-// @route   GET api/courses/enrolled
-// @desc    Get courses the student is enrolled in
-// @access  Private
-router.get('/courses/enrolled', authMiddleware, (req, res) => {
+// Course handlers are shared with the /api/courses router below.
+const listEnrolledCourses = (req, res) => {
   try {
     // In a real app, this would filter courses by user enrollment
     // For demo purposes, we'll just return all courses
@@ -95,19 +149,16 @@ router.get('/courses/enrolled', authMiddleware, (req, res) => {
     console.error('Error fetching enrolled courses:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
-});
+};
 
-// @route   GET api/courses/:id
-// @desc    Get a specific course with all details
-// @access  Private
-router.get('/courses/:id', authMiddleware, (req, res) => {
+const getCourse = (req, res) => {
   try {
     const course = courses.find(c => c._id === req.params.id);
-    
+
     if (!course) {
       return res.status(404).json({ success: false, message: 'Course not found' });
     }
-    
+
     res.json({
       success: true,
       course
@@ -116,7 +167,26 @@ router.get('/courses/:id', authMiddleware, (req, res) => {
     console.error('Error fetching course:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
+};
+
+// @route   GET api/curriculum/courses/enrolled
+// @desc    Get courses the student is enrolled in
+// @access  Private
+router.get('/courses/enrolled', authMiddleware, listEnrolledCourses);
+
+// @route   GET api/curriculum/courses/:id
+// @desc    Get a specific course with all details
+// @access  Private
+router.get('/courses/:id', authMiddleware, getCourse);
+
+// The frontend calls these as /api/courses/enrolled and /api/courses/:id, which
+// were never mounted (404). server.js mounts this router at /api/courses.
+const coursesRouter = express.Router();
+coursesRouter.get('/enrolled', authMiddleware, listEnrolledCourses);
+coursesRouter.get('/', authMiddleware, (req, res) => {
+  res.json({ success: true, courses });
 });
+coursesRouter.get('/:id', authMiddleware, getCourse);
 
 // @route   GET api/curriculum/map/:courseId
 // @desc    Get the curriculum map for a course
@@ -291,3 +361,4 @@ router.post('/generate-outcomes-from-description', auth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.coursesRouter = coursesRouter;

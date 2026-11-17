@@ -1,29 +1,42 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+// Relative by default so requests go through the CRA dev proxy (and the same
+// origin in production) instead of hard-coding http://localhost:5000.
+const API_URL = process.env.REACT_APP_API_URL || '/api';
 
-// Get auth token from localStorage
-const getToken = () => localStorage.getItem('token');
+// AI generation (Gemini) can be slow, but never let a request hang forever.
+const AI_TIMEOUT_MS = 120000;
 
-// Create axios instance with auth headers
-const authAxios = () => {
-  const token = getToken();
-  
-  // Log token availability for debugging (remove in production)
-  console.log(`Auth token available: ${!!token}`);
-  
-  if (!token) {
-    console.warn('No authentication token found. User may need to log in again.');
+// Use the shared axios instance so the token-refresh interceptor from
+// AuthContext applies; send the token explicitly as well.
+const authConfig = (extra = {}) => ({
+  ...extra,
+  headers: {
+    'Content-Type': 'application/json',
+    'x-auth-token': localStorage.getItem('token') || '',
+    ...(extra.headers || {})
   }
-  
-  return axios.create({
-    baseURL: API_URL,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-auth-token': token
-    }
-  });
+});
+
+const errorMessage = (error, fallback) =>
+  error?.response?.data?.message || error?.message || fallback;
+
+// Backend returns either an array of outcomes or an object wrapping one.
+const toOutcomeArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.learningOutcomes)) return value.learningOutcomes;
+  if (value && Array.isArray(value.outcomes)) return value.outcomes;
+  return null;
 };
+
+const mapOutcomes = (outcomes) =>
+  outcomes
+    .filter(outcome => outcome && outcome.text)
+    .map(outcome => ({
+      text: outcome.text,
+      bloom: outcome.bloom,
+      competency: outcome.competency
+    }));
 
 /**
  * Generate curriculum mapping using Gemini AI
@@ -32,31 +45,25 @@ const authAxios = () => {
  * @returns {Promise} - Promise with curriculum data
  */
 export const generateCurriculumWithAI = async (courseTitle, courseDescription = '') => {
-  try {
-    const response = await authAxios().post('/curriculum/generate', {
-      courseTitle,
-      courseDescription
-    });
-    return response.data;
-  } catch (error) {
-    console.error('Error generating curriculum:', error);
-    throw error;
-  }
+  const response = await axios.post(
+    `${API_URL}/curriculum/generate`,
+    { courseTitle, courseDescription },
+    authConfig({ timeout: AI_TIMEOUT_MS })
+  );
+  return response.data;
 };
 
 /**
  * Get curriculum mapping for a course
  * @param {string} courseId - Course ID
- * @returns {Promise} - Promise with curriculum data
+ * @returns {Promise} - Promise with `{ success, curriculumMap }`
  */
 export const getCurriculumMap = async (courseId) => {
-  try {
-    const response = await authAxios().get(`/curriculum/map/${courseId}`);
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching curriculum map:', error);
-    throw error;
-  }
+  const response = await axios.get(
+    `${API_URL}/curriculum/map/${encodeURIComponent(courseId)}`,
+    authConfig({ timeout: 30000 })
+  );
+  return response.data;
 };
 
 /**
@@ -67,42 +74,28 @@ export const getCurriculumMap = async (courseId) => {
  */
 export const generateCurriculumMap = async (courseTitle, courseDescription = '') => {
   try {
-    console.log(`Generating curriculum for: "${courseTitle}" with description: "${courseDescription}"`);
-    
     // Call the AI generation endpoint with both title and description
     const result = await generateCurriculumWithAI(courseTitle, courseDescription);
-    
+
     // Check if the response contains the data property
-    if (!result.data) {
-      console.error('Unexpected response format:', result);
+    if (!result || !result.data) {
       throw new Error('Invalid response format from server');
     }
-    
+
     const curriculumData = result.data;
-    
-    // Extract topics and learning outcomes from the response
-    const topics = curriculumData.topics || [];
-    const learningOutcomes = curriculumData.learningOutcomes || [];
-    
-    console.log('Generated topics:', topics);
-    console.log('Generated learning outcomes:', learningOutcomes);
-    
+
     return {
       success: true,
       data: {
-        topics: topics,
-        outcomes: learningOutcomes.map(outcome => ({
-          text: outcome.text,
-          bloom: outcome.bloom,
-          competency: outcome.competency
-        }))
+        topics: Array.isArray(curriculumData.topics) ? curriculumData.topics : [],
+        outcomes: mapOutcomes(toOutcomeArray(curriculumData.learningOutcomes) || [])
       }
     };
   } catch (error) {
     console.error('Error in curriculum generation:', error);
     return {
       success: false,
-      error: error.message || 'Failed to generate curriculum'
+      error: errorMessage(error, 'Failed to generate curriculum')
     };
   }
 };
@@ -116,33 +109,26 @@ export const generateCurriculumMap = async (courseTitle, courseDescription = '')
  */
 export const generateLearningOutcomesFromTopics = async (courseTitle, courseDescription, topics) => {
   try {
-    console.log(`Generating learning outcomes for topics: "${topics.join(', ')}"`);
-    
-    const response = await authAxios().post('/curriculum/generate-outcomes', {
-      courseTitle,
-      courseDescription,
-      topics
-    });
-    
-    if (!response.data || !response.data.learningOutcomes) {
+    const response = await axios.post(
+      `${API_URL}/curriculum/generate-outcomes`,
+      { courseTitle, courseDescription, topics },
+      authConfig({ timeout: AI_TIMEOUT_MS })
+    );
+
+    const outcomes = toOutcomeArray(response.data?.learningOutcomes);
+    if (!outcomes) {
       throw new Error('Invalid response format from server');
     }
-    
+
     return {
       success: true,
-      data: {
-        outcomes: response.data.learningOutcomes.map(outcome => ({
-          text: outcome.text,
-          bloom: outcome.bloom,
-          competency: outcome.competency
-        }))
-      }
+      data: { outcomes: mapOutcomes(outcomes) }
     };
   } catch (error) {
     console.error('Error generating learning outcomes:', error);
     return {
       success: false,
-      error: error.message || 'Failed to generate learning outcomes'
+      error: errorMessage(error, 'Failed to generate learning outcomes')
     };
   }
 };
@@ -155,40 +141,36 @@ export const generateLearningOutcomesFromTopics = async (courseTitle, courseDesc
  */
 export const generateLearningOutcomesFromDescription = async (courseTitle, courseDescription) => {
   try {
-    console.log(`Generating learning outcomes from description for: "${courseTitle}"`);
-    
-    const response = await authAxios().post('/curriculum/generate-outcomes-from-description', {
-      courseTitle,
-      courseDescription
-    });
-    
-    if (!response.data || !response.data.learningOutcomes) {
+    const response = await axios.post(
+      `${API_URL}/curriculum/generate-outcomes-from-description`,
+      { courseTitle, courseDescription },
+      authConfig({ timeout: AI_TIMEOUT_MS })
+    );
+
+    const outcomes = toOutcomeArray(response.data?.learningOutcomes);
+    if (!outcomes) {
       throw new Error('Invalid response format from server');
     }
-    
+
     return {
       success: true,
-      data: {
-        outcomes: response.data.learningOutcomes.map(outcome => ({
-          text: outcome.text,
-          bloom: outcome.bloom,
-          competency: outcome.competency
-        }))
-      }
+      data: { outcomes: mapOutcomes(outcomes) }
     };
   } catch (error) {
     console.error('Error generating learning outcomes:', error);
     return {
       success: false,
-      error: error.message || 'Failed to generate learning outcomes'
+      error: errorMessage(error, 'Failed to generate learning outcomes')
     };
   }
 };
 
-export default {
+const curriculumService = {
   generateCurriculumWithAI,
   getCurriculumMap,
   generateCurriculumMap,
   generateLearningOutcomesFromTopics,
   generateLearningOutcomesFromDescription
 };
+
+export default curriculumService;

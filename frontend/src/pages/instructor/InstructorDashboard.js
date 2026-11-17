@@ -18,7 +18,6 @@ import {
     Card,
     CardContent,
     Chip,
-    CircularProgress,
     Container,
     Divider,
     Grid,
@@ -38,8 +37,10 @@ import {
     Tooltip,
     Typography
 } from '@mui/material';
-import React, { useEffect, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
+import { loadInstructorCourses } from './instructorData';
 
 // Mock data for instructor dashboard
 const mockData = {
@@ -80,6 +81,7 @@ const mockData = {
   ],  recentAssessments: [
     {
       id: '1',
+      courseId: '1',
       title: 'Java Data Structures Assessment',
       courseTitle: 'Data Structures and Algorithms in Java',
       courseCode: 'CS301',
@@ -89,6 +91,7 @@ const mockData = {
     },
     {
       id: '2',
+      courseId: '2',
       title: 'Programming Assignment 3',
       courseTitle: 'Introduction to Programming',
       courseCode: 'CS101',
@@ -98,6 +101,7 @@ const mockData = {
     },
     {
       id: '3',
+      courseId: '3',
       title: 'Frontend Project',
       courseTitle: 'Web Development Fundamentals',
       courseCode: 'CS240',
@@ -192,30 +196,24 @@ const mockData = {
 
 const InstructorDashboard = () => {
   const navigate = useNavigate();
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  
-  useEffect(() => {
-    // In a real app, you would fetch this data from an API
-    setTimeout(() => {
-      setData(mockData);
-      setLoading(false);
-    }, 1200);
+  const { currentUser } = useAuth();
+  const firstName = (currentUser?.name || '').trim().split(/s+/)[0];
+  // No dashboard API exists; render immediately (the old 1.2s fake delay made the
+  // page feel slow). Courses come from the same store as Course Management so
+  // created/deleted courses show up here too.
+  const data = useMemo(() => {
+    const courses = loadInstructorCourses().map(course => ({
+      id: course.id,
+      title: course.title,
+      code: course.code,
+      term: course.term,
+      enrollment: course.enrollment || 0,
+      assessmentCount: course.assessmentCount || 0,
+      recentActivity: mockData.courses.find(c => c.id === course.id)?.recentActivity ?? false
+    }));
+    return { ...mockData, courses };
   }, []);
-  
-  if (loading) {
-    return (
-      <Box 
-        display="flex" 
-        justifyContent="center" 
-        alignItems="center" 
-        minHeight="80vh"
-      >
-        <CircularProgress />
-      </Box>
-    );
-  }
-  
+
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Grid container spacing={3}>
@@ -224,7 +222,7 @@ const InstructorDashboard = () => {
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
             <Box>
               <Typography variant="h4" component="h1" gutterBottom>
-                Welcome back, {data.instructor.name}
+                {firstName ? `Welcome back, ${firstName}` : 'Welcome back'}
               </Typography>
               <Typography variant="subtitle1" color="text.secondary">
                 {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
@@ -472,7 +470,7 @@ const InstructorDashboard = () => {
                   <ListItem 
                     button 
                     component={RouterLink} 
-                    to={`/instructor/student-results/${assessment.id}`}
+                    to={`/instructor/student-results/${assessment.courseId}?assessment=${assessment.id}`}
                   >
                     <ListItemText
                       primary={assessment.title}
@@ -530,6 +528,7 @@ const InstructorDashboard = () => {
                     </ListItemIcon>
                     <ListItemText
                       primary={assessment.title}
+                      secondaryTypographyProps={{ component: 'div' }}
                       secondary={
                         <Box>
                           <Typography variant="body2" component="span">

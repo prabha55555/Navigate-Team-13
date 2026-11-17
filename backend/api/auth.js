@@ -1,76 +1,86 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const User = require('../models/User'); // Import User model
-
-// Store refresh tokens (in production, store in database)
-const refreshTokens = new Set();
+const mongoose = require('mongoose');
+const User = require('../models/User');
 
 // Token configuration
 const ACCESS_TOKEN_EXPIRY = '15m'; // Short-lived access token
 const REFRESH_TOKEN_EXPIRY = '7d'; // Longer-lived refresh token
 const JWT_SECRET = process.env.JWT_SECRET || 'default_secret';
-const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'refresh_secret';
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || `${JWT_SECRET}_refresh`;
 
-// Generate JWT token
-const generateAccessToken = (payload) => {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+// Roles a user may pick for themselves at sign-up. 'admin' is never self-assignable.
+const SELF_ASSIGNABLE_ROLES = ['student', 'instructor'];
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD_LENGTH = 6;
+
+// Refresh tokens are verified statelessly (signature + expiry), so they survive
+// server restarts. Only logged-out tokens are tracked, until they would expire anyway.
+const revokedRefreshTokens = new Set();
+
+const generateAccessToken = (payload) =>
+  jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+
+const generateRefreshToken = (payload) =>
+  jwt.sign(payload, REFRESH_TOKEN_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+const normalizeEmail = (email) => (typeof email === 'string' ? email.trim().toLowerCase() : '');
+
+const toPublicUser = (user) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role
+});
+
+const issueTokens = (user) => {
+  const payload = { user: { id: user._id, role: user.role } };
+  return {
+    token: generateAccessToken(payload),
+    refreshToken: generateRefreshToken(payload)
+  };
 };
 
-// Generate refresh token
-const generateRefreshToken = (payload) => {
-  const refreshToken = jwt.sign(payload, REFRESH_TOKEN_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
-  refreshTokens.add(refreshToken);
-  return refreshToken;
-};
+const dbUnavailable = () => mongoose.connection.readyState !== 1;
 
 // @route   POST api/auth/register
 // @desc    Register a user
 // @access  Public
 router.post('/register', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
-    
-    // Check if user already exists
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const email = normalizeEmail(req.body.email);
+    const { password } = req.body;
+    const role = SELF_ASSIGNABLE_ROLES.includes(req.body.role) ? req.body.role : 'student';
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email and password are required' });
+    }
+    if (!EMAIL_PATTERN.test(email)) {
+      return res.status(400).json({ message: 'Please enter a valid email address' });
+    }
+    if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+    }
+    if (dbUnavailable()) {
+      return res.status(503).json({ message: 'Database is unavailable. Please try again shortly.' });
+    }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
+      return res.status(400).json({ message: 'An account with this email already exists' });
     }
-    
-    // Create new user in database
-    const newUser = new User({
-      name,
-      email,
-      password, // Will be hashed by pre-save hook in User model
-      role: role || 'student'
-    });
-    
-    // Save user to database
+
+    const newUser = new User({ name, email, password, role }); // password hashed by pre-save hook
     await newUser.save();
-    
-    // Generate tokens
-    const payload = {
-      user: {
-        id: newUser._id,
-        role: newUser.role
-      }
-    };
-    
-    const accessToken = generateAccessToken(payload);
-    const refreshToken = generateRefreshToken(payload);
-    
-    res.json({ 
-      token: accessToken,
-      refreshToken,
-      user: {
-        id: newUser._id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role
-      }
-    });
+
+    res.status(201).json({ ...issueTokens(newUser), user: toPublicUser(newUser) });
   } catch (err) {
+    // Two simultaneous sign-ups with the same email hit the unique index.
+    if (err && err.code === 11000) {
+      return res.status(400).json({ message: 'An account with this email already exists' });
+    }
     console.error('Register error:', err);
     res.status(500).json({ message: 'Server error' });
   }
@@ -81,41 +91,22 @@ router.post('/register', async (req, res) => {
 // @access  Public
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    
-    // Find user in database
+    const email = normalizeEmail(req.body.email);
+    const { password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+    if (dbUnavailable()) {
+      return res.status(503).json({ message: 'Database is unavailable. Please try again shortly.' });
+    }
+
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+    if (!user || !(await user.comparePassword(password))) {
+      return res.status(400).json({ message: 'Invalid email or password' });
     }
-    
-    // Check password using the method in User model
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(400).json({ message: 'Invalid credentials' });
-    }
-    
-    // Generate tokens
-    const payload = {
-      user: {
-        id: user._id,
-        role: user.role
-      }
-    };
-    
-    const accessToken = generateAccessToken(payload);
-    const refreshToken = generateRefreshToken(payload);
-    
-    res.json({ 
-      token: accessToken,
-      refreshToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
-    });
+
+    res.json({ ...issueTokens(user), user: toPublicUser(user) });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ message: 'Server error' });
@@ -127,29 +118,18 @@ router.post('/login', async (req, res) => {
 // @access  Public
 router.post('/refresh-token', (req, res) => {
   const { refreshToken } = req.body;
-  
-  // Check if refresh token exists
+
   if (!refreshToken) {
     return res.status(401).json({ message: 'Refresh token is required' });
   }
-  
-  // Check if refresh token is valid
-  if (!refreshTokens.has(refreshToken)) {
+  if (revokedRefreshTokens.has(refreshToken)) {
     return res.status(403).json({ message: 'Invalid refresh token' });
   }
-  
+
   try {
-    // Verify refresh token
     const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET);
-    
-    // Generate new access token
-    const payload = { user: decoded.user };
-    const accessToken = generateAccessToken(payload);
-    
-    res.json({ token: accessToken });
+    res.json({ token: generateAccessToken({ user: decoded.user }) });
   } catch (err) {
-    // Remove invalid refresh token
-    refreshTokens.delete(refreshToken);
     res.status(403).json({ message: 'Invalid refresh token' });
   }
 });
@@ -159,9 +139,16 @@ router.post('/refresh-token', (req, res) => {
 // @access  Public
 router.post('/logout', (req, res) => {
   const { refreshToken } = req.body;
-  
-  // Remove refresh token
-  refreshTokens.delete(refreshToken);
+
+  if (refreshToken) {
+    revokedRefreshTokens.add(refreshToken);
+    // Forget the token once it would have expired anyway, so the set stays small.
+    const decoded = jwt.decode(refreshToken);
+    if (decoded && decoded.exp) {
+      const ttl = Math.max(0, decoded.exp * 1000 - Date.now());
+      setTimeout(() => revokedRefreshTokens.delete(refreshToken), ttl).unref();
+    }
+  }
   res.json({ message: 'Logged out successfully' });
 });
 
@@ -170,30 +157,30 @@ router.post('/logout', (req, res) => {
 // @access  Private
 router.get('/me', async (req, res) => {
   const token = req.header('x-auth-token');
-  
+
   if (!token) {
     return res.status(401).json({ message: 'No token, authorization denied' });
   }
-  
+
+  let decoded;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Find user in database
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch (err) {
+    return res.status(401).json({ message: 'Token is not valid' });
+  }
+
+  try {
+    if (dbUnavailable()) {
+      return res.status(503).json({ message: 'Database is unavailable. Please try again shortly.' });
+    }
     const user = await User.findById(decoded.user.id).select('-password');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-    
-    res.json({
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role
-      }
-    });
+    res.json({ user: toPublicUser(user) });
   } catch (err) {
-    res.status(401).json({ message: 'Token is not valid' });
+    console.error('Get current user error:', err);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 

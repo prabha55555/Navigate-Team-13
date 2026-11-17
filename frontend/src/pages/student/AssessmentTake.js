@@ -38,15 +38,139 @@ import {
     Typography
 } from '@mui/material';
 import axios from 'axios';
-import { useEffect, useRef, useState } from 'react';
+import InlineCode from '../../components/common/InlineCode';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import ProctoringWebcam from '../../components/student/ProctoringWebcam';
 import { useAuth } from '../../contexts/AuthContext';
+import AssessmentTakeLoader, { isAnswered } from '../../services/assessmentTakeLoader';
+
+const VIOLATION_THRESHOLD = 5; // You can adjust this value
+const PASS_THRESHOLD = 50;
+// Ctrl/Cmd + C, V, R are blocked. `code` covers non-Latin keyboard layouts.
+const BLOCKED_COMBO_KEYS = new Set(['c', 'v', 'r']);
+const BLOCKED_COMBO_CODES = new Set(['KeyC', 'KeyV', 'KeyR']);
+const FULLSCREEN_EVENTS = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
+
+// Fullscreen API helpers (prefixed variants for Safari / older browsers)
+const getFullscreenElement = () =>
+  document.fullscreenElement ||
+  document.webkitFullscreenElement ||
+  document.mozFullScreenElement ||
+  document.msFullscreenElement ||
+  null;
+
+const enterFullscreen = (elem) => {
+  if (!elem) return Promise.reject(new Error('Nothing to show in full screen'));
+  const request =
+    elem.requestFullscreen || elem.webkitRequestFullscreen || elem.mozRequestFullScreen || elem.msRequestFullscreen;
+  if (!request) return Promise.reject(new Error('Full screen is not supported'));
+  try {
+    return Promise.resolve(request.call(elem));
+  } catch (e) {
+    return Promise.reject(e);
+  }
+};
+
+const exitFullscreen = () => {
+  if (!getFullscreenElement()) return;
+  const exit =
+    document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+  if (!exit) return;
+  try {
+    Promise.resolve(exit.call(document)).catch(() => {});
+  } catch (e) {
+    // Ignore errors if the document already left full screen
+  }
+};
+
+// Format the remaining time
+const formatTime = (seconds) => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  return `${hours > 0 ? `${hours}h ` : ''}${minutes}m ${secs}s`;
+};
+
+const secondsUntil = (endTime) => Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+
+// Owns the countdown tick so the rest of the page does not re-render every second.
+// Time is derived from a fixed end timestamp, so throttled background timers can't drift.
+function CountdownChip({ endTime, onExpire }) {
+  const [remaining, setRemaining] = useState(() => secondsUntil(endTime));
+  const onExpireRef = useRef(onExpire);
+
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+  }, [onExpire]);
+
+  useEffect(() => {
+    let expired = false;
+    const tick = () => {
+      const left = secondsUntil(endTime);
+      setRemaining(left);
+      if (left <= 0 && !expired) {
+        expired = true;
+        clearInterval(intervalId);
+        onExpireRef.current();
+      }
+    };
+    const intervalId = setInterval(tick, 500);
+    tick();
+    return () => clearInterval(intervalId);
+  }, [endTime]);
+
+  return (
+    <Chip
+      icon={<AccessTimeIcon />}
+      label={`Time remaining: ${formatTime(remaining)}`}
+      color={remaining < 300 ? 'error' : 'default'}
+      variant="outlined"
+    />
+  );
+}
+
+const MemoCountdownChip = memo(CountdownChip);
+
+// An in-progress attempt (deadline, violations, answers) is kept in localStorage so a
+// page reload resumes it instead of granting a fresh timer and a clean violation count.
+const attemptStorageKey = (userId, assessmentId) =>
+  userId && assessmentId ? `navigate:attempt:${userId}:${assessmentId}` : null;
+
+const readAttempt = (key) => {
+  if (!key) return null;
+  try {
+    const attempt = JSON.parse(localStorage.getItem(key));
+    return attempt && typeof attempt.startTime === 'number' ? attempt : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeAttempt = (key, attempt) => {
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(attempt));
+  } catch {
+    // Storage full or blocked: the attempt simply won't survive a reload.
+  }
+};
+
+const clearAttempt = (key) => {
+  if (!key) return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+};
 
 const AssessmentTake = () => {
   const { assessmentId } = useParams();
   const navigate = useNavigate();
   const { currentUser } = useAuth();
+  const attemptKey = attemptStorageKey(currentUser?.id, assessmentId);
 
   const [assessment, setAssessment] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -54,225 +178,219 @@ const AssessmentTake = () => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [flaggedQuestions, setFlaggedQuestions] = useState([]);
-  const [timeRemaining, setTimeRemaining] = useState(null);
+  const [timeLimitSeconds, setTimeLimitSeconds] = useState(null);
+  const [endTime, setEndTime] = useState(null);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [timer, setTimer] = useState(null);
+  const [submitError, setSubmitError] = useState(null);
   const [testStarted, setTestStarted] = useState(false);
+  const [terminated, setTerminated] = useState(false);
   const [fullscreenViolation, setFullscreenViolation] = useState(false);
   const [proctorViolation, setProctorViolation] = useState(false);
   const [violationCount, setViolationCount] = useState(0);
-  const VIOLATION_THRESHOLD = 5; // You can adjust this value
+  const [savedAttempt, setSavedAttempt] = useState(null);
   const containerRef = useRef(null);
+  const attemptKeyRef = useRef(attemptKey);
+  attemptKeyRef.current = attemptKey;
+
+  // Refs read from event handlers and timers so they always see current values.
+  const testActiveRef = useRef(false);
+  const submittingRef = useRef(false);
+  const wasFullscreenRef = useRef(false);
+  const startTimeRef = useRef(null);
+  const answersRef = useRef(answers);
+  const assessmentRef = useRef(assessment);
+
   useEffect(() => {
-    const fetchAssessment = async () => {
-      setLoading(true);
-      try {
-        // Import the assessmentTakeLoader utility
-        const AssessmentTakeLoader = (await import('../../services/assessmentTakeLoader')).default;
-        console.log(`Loading assessment with ID: ${assessmentId}`);
-        // Use the assessmentTakeLoader to fetch the assessment from the API
-        const success = await AssessmentTakeLoader(
-          assessmentId, 
-          setAssessment, 
-          setTimeRemaining, 
-          setError, 
-          setLoading
-        );
-        if (!success) {
-          console.error('Failed to load assessment from the API');
-          setError('Could not load the assessment. Please check that the assessment exists and has been published.');
-        }
-      } catch (error) {
-        console.error('Error loading assessment:', error);
+    answersRef.current = answers;
+  }, [answers]);
+
+  useEffect(() => {
+    assessmentRef.current = assessment;
+  }, [assessment]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ifActive = (setter) => (value) => {
+      if (!cancelled) setter(value);
+    };
+    setLoading(true);
+    setError(null);
+    // The loader reports its own (more specific) errors through setError.
+    AssessmentTakeLoader(
+      assessmentId,
+      ifActive(setAssessment),
+      ifActive(setTimeLimitSeconds),
+      ifActive(setError),
+      ifActive(setLoading)
+    ).catch((loadError) => {
+      console.error('Error loading assessment:', loadError);
+      if (!cancelled) {
         setError('Failed to load assessment. Please try again later.');
-      } finally {
         setLoading(false);
       }
-    };
-    fetchAssessment();
-    // Clean up timer on unmount
+    });
     return () => {
-      if (timer) {
-        clearInterval(timer);
-      }
+      cancelled = true;
     };
   }, [assessmentId]);
   
+  // Offer to resume an attempt that was interrupted by a reload.
   useEffect(() => {
-    if (testStarted && timeRemaining !== null && timeRemaining > 0) {
-      const interval = setInterval(() => {
-        setTimeRemaining(prev => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            handleSubmitAssessment();
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-      
-      setTimer(interval);
-      
-      return () => clearInterval(interval);
-    }
-  }, [testStarted, timeRemaining]);
-  
-  // Fullscreen API helpers - only for test-taking mode
-  const enterFullscreen = () => {
-    // Only fullscreen the main assessment content, not the sidebar/header
-    const elem = document.getElementById('assessment-fullscreen-container');
-    if (elem && elem.requestFullscreen) {
-      elem.requestFullscreen().catch(() => {});
-    } else if (elem && elem.mozRequestFullScreen) {
-      elem.mozRequestFullScreen();
-    } else if (elem && elem.webkitRequestFullscreen) {
-      elem.webkitRequestFullscreen();
-    } else if (elem && elem.msRequestFullscreen) {
-      elem.msRequestFullscreen();
-    }
-  };
+    setSavedAttempt(assessment ? readAttempt(attemptKey) : null);
+  }, [assessment, attemptKey]);
 
-  const exitFullscreen = () => {
-    // Only exit fullscreen if testStarted is false (leaving test-taking mode)
-    if (testStarted) return;
-    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
-    if (!document.hasFocus() || !isFullscreen) return;
-    try {
-      if (document.exitFullscreen) document.exitFullscreen();
-      else if (document.mozCancelFullScreen) document.mozCancelFullScreen();
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-      else if (document.msExitFullscreen) document.msExitFullscreen();
-    } catch (e) {
-      // Ignore errors if document is not active
-    }
-  };
-
-  // Listen for fullscreen changes
+  // Keep the stored attempt current while the test is running.
   useEffect(() => {
-    function handleFullscreenChange() {
-      const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
-      if (!isFullscreen && testStarted) {
+    if (!testStarted || !startTimeRef.current) return;
+    writeAttempt(attemptKey, {
+      startTime: startTimeRef.current,
+      endTime,
+      violationCount,
+      answers,
+      currentQuestionIndex
+    });
+  }, [testStarted, attemptKey, endTime, violationCount, answers, currentQuestionIndex]);
+
+  // Stop counting violations once the component is gone.
+  useEffect(() => () => {
+    testActiveRef.current = false;
+  }, []);
+
+  // Helper to increment violation count (ignored outside an active, unsubmitted test)
+  const recordViolation = useCallback((reason) => {
+    if (!testActiveRef.current || submittingRef.current) return;
+    setViolationCount((prev) => prev + 1);
+  }, []);
+
+  // Enter full screen when the test starts; leave it when the test ends or the page unmounts.
+  useEffect(() => {
+    if (!testStarted) return undefined;
+    enterFullscreen(containerRef.current).catch(() => {
+      // Request refused (e.g. browser policy): prompt the student to retry instead of
+      // silently continuing in a window. Not counted as a violation.
+      if (testActiveRef.current && !getFullscreenElement()) {
         setFullscreenViolation(true);
-      } else {
-        setFullscreenViolation(false);
       }
-    }
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
-      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
-    };
+    });
+    return () => exitFullscreen();
   }, [testStarted]);
 
-  const handleProctorViolation = (reason) => {
-    setProctorViolation(true);
-    incrementViolation('Face not detected');
-  };
-
-  const startTest = () => {
-    setTestStarted(true);
-    setFullscreenViolation(false);
-    setProctorViolation(false);
-    setViolationCount(0);
-    // Wait for DOM update, then request fullscreen
-    setTimeout(() => {
-      enterFullscreen();
-    }, 0);
-  };
-
-  // Exit full screen when leaving assessment-taking mode
+  // Listen for fullscreen changes. Only a real fullscreen -> windowed transition counts,
+  // so duplicate (prefixed + unprefixed) events can't double count.
   useEffect(() => {
-    if (!testStarted) {
-      // Only exit fullscreen if we were in test mode
-      exitFullscreen();
-    }
-    // Only run when testStarted changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [testStarted]);
+    if (!testStarted) return undefined;
+    const handleFullscreenChange = () => {
+      if (!testActiveRef.current) return;
+      const isFullscreen = Boolean(getFullscreenElement());
+      if (isFullscreen === wasFullscreenRef.current) return;
+      wasFullscreenRef.current = isFullscreen;
+      setFullscreenViolation(!isFullscreen);
+      if (!isFullscreen) {
+        recordViolation('Exited full screen');
+      }
+    };
+    FULLSCREEN_EVENTS.forEach((eventName) => document.addEventListener(eventName, handleFullscreenChange));
+    return () => {
+      FULLSCREEN_EVENTS.forEach((eventName) => document.removeEventListener(eventName, handleFullscreenChange));
+    };
+  }, [testStarted, recordViolation]);
 
   // Keyboard restrictions and violation logic
   useEffect(() => {
-    if (!testStarted) return;
+    if (!testStarted) return undefined;
     const handleKeyDown = (e) => {
-      // Block Ctrl+C, Ctrl+V, Ctrl+R, F5, Windows key
-      if (
-        (e.ctrlKey && (e.key === 'c' || e.key === 'C' || e.key === 'v' || e.key === 'V' || e.key === 'r' || e.key === 'R')) ||
-        e.key === 'F5' ||
-        e.key === 'Meta' || // Windows key (Meta)
-        e.key === 'OS'
-      ) {
-        e.preventDefault();
-        incrementViolation('Prohibited key pressed');
-      }
+      const key = (e.key || '').toLowerCase();
+      const isBlockedCombo =
+        (e.ctrlKey || e.metaKey) && (BLOCKED_COMBO_KEYS.has(key) || BLOCKED_COMBO_CODES.has(e.code));
+      const isBlockedKey = e.key === 'F5' || e.key === 'Meta' || e.key === 'OS';
+      if (!isBlockedCombo && !isBlockedKey) return;
+      e.preventDefault();
+      // Holding a key auto-repeats keydown; count each press once. A Cmd+<key> combo was
+      // already counted when Cmd (Meta) itself went down.
+      if (e.repeat || (isBlockedCombo && !e.ctrlKey && !isBlockedKey)) return;
+      recordViolation('Prohibited key pressed');
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [testStarted]);
+  }, [testStarted, recordViolation]);
 
-  // Violation logic for fullscreen
-  useEffect(() => {
-    if (fullscreenViolation && testStarted) {
-      incrementViolation('Exited full screen');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fullscreenViolation]);
+  // Camera proctoring callbacks (stable, so the webcam is not restarted on re-render)
+  const handleProctorViolation = useCallback((reason) => {
+    setProctorViolation(true);
+    recordViolation(reason || 'Camera/face violation');
+  }, [recordViolation]);
 
-  // Violation logic for proctoring
-  useEffect(() => {
-    if (proctorViolation && testStarted) {
-      incrementViolation('Camera/face violation');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proctorViolation]);
+  const handleProctorRecover = useCallback(() => {
+    setProctorViolation(false);
+  }, []);
 
   // Terminate exam if violation threshold exceeded
   useEffect(() => {
-    if (violationCount >= VIOLATION_THRESHOLD && testStarted) {
+    if (testStarted && violationCount >= VIOLATION_THRESHOLD) {
+      testActiveRef.current = false;
+      clearAttempt(attemptKeyRef.current);
       setTestStarted(false);
-      exitFullscreen();
-      // Optionally, you can show a modal or redirect to dashboard
-      setTimeout(() => {
-        navigate('/dashboard', { replace: true, state: { terminated: true } });
-      }, 1000);
+      setTerminated(true);
       setError('Exam terminated due to repeated violations.');
     }
   }, [violationCount, testStarted]);
 
-  // Helper to increment violation count
-  const incrementViolation = (reason) => {
-    setViolationCount((prev) => prev + 1);
+  useEffect(() => {
+    if (!terminated) return undefined;
+    const timeoutId = setTimeout(() => {
+      navigate('/dashboard', { replace: true, state: { terminated: true } });
+    }, 1000);
+    return () => clearTimeout(timeoutId);
+  }, [terminated, navigate]);
+
+  const handleReturnToFullscreen = () => {
+    enterFullscreen(containerRef.current).catch(() => {});
   };
   
-  // Format the remaining time
-  const formatTime = (seconds) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    
-    return `${hours > 0 ? `${hours}h ` : ''}${minutes}m ${secs}s`;
-  };
-  
-  // Calculate progress percentage
-  const progressPercentage = () => {
-    const totalQuestions = assessment?.questions.length || 0;
-    const answeredQuestions = Object.keys(answers).length;
-    return (answeredQuestions / totalQuestions) * 100;
+  const startTest = () => {
+    // Resuming keeps the original deadline and violation count; if the deadline passed
+    // while away, the countdown fires immediately and submits the saved answers.
+    const resume = savedAttempt;
+    testActiveRef.current = true;
+    submittingRef.current = false;
+    wasFullscreenRef.current = Boolean(getFullscreenElement());
+    startTimeRef.current = resume ? resume.startTime : Date.now();
+    setEndTime(
+      resume
+        ? resume.endTime ?? null
+        : (timeLimitSeconds ? Date.now() + timeLimitSeconds * 1000 : null)
+    );
+    setFullscreenViolation(false);
+    setProctorViolation(false);
+    setViolationCount(resume ? Number(resume.violationCount) || 0 : 0);
+    if (resume?.answers && typeof resume.answers === 'object') {
+      setAnswers(resume.answers);
+    }
+    if (Number.isInteger(resume?.currentQuestionIndex)) {
+      setCurrentQuestionIndex(resume.currentQuestionIndex);
+    }
+    setSubmitError(null);
+    setTestStarted(true);
   };
   
   // Handle answer change
-  const handleAnswerChange = (value) => {
-    const questionId = assessment.questions[currentQuestionIndex].id;
-    setAnswers({
-      ...answers,
+  const handleAnswerChange = (questionId, value) => {
+    setAnswers((prev) => ({
+      ...prev,
       [questionId]: value
+    }));
+  };
+
+  const handleMultiSelectChange = (questionId, option, checked) => {
+    setAnswers((prev) => {
+      const currentSelections = Array.isArray(prev[questionId]) ? prev[questionId] : [];
+      const nextSelections = checked
+        ? (currentSelections.includes(option) ? currentSelections : [...currentSelections, option])
+        : currentSelections.filter((item) => item !== option);
+      return { ...prev, [questionId]: nextSelections };
     });
   };
   
@@ -293,11 +411,9 @@ const AssessmentTake = () => {
   // Toggle flagged status of current question
   const toggleFlagged = () => {
     const questionId = assessment.questions[currentQuestionIndex].id;
-    if (flaggedQuestions.includes(questionId)) {
-      setFlaggedQuestions(flaggedQuestions.filter(id => id !== questionId));
-    } else {
-      setFlaggedQuestions([...flaggedQuestions, questionId]);
-    }
+    setFlaggedQuestions((prev) =>
+      prev.includes(questionId) ? prev.filter((id) => id !== questionId) : [...prev, questionId]
+    );
   };
   
   // Open confirmation dialog
@@ -307,37 +423,46 @@ const AssessmentTake = () => {
   
   // Close confirmation dialog
   const handleCloseSubmitDialog = () => {
-    setConfirmSubmit(false);
+    if (!submittingRef.current) setConfirmSubmit(false);
   };
   
-  // Handle assessment submission
-  const handleSubmitAssessment = async () => {
-    alert('Submit function called!'); // TEMP: Remove after confirming
-    setConfirmSubmit(false); // Close dialog
-    console.log('Submit button clicked');
+  // Handle assessment submission (manual or when the timer runs out). Guarded so a
+  // double click, or the timer firing during a manual submit, only submits once.
+  const handleSubmitAssessment = useCallback(async () => {
+    const currentAssessment = assessmentRef.current;
+    if (!currentAssessment || submittingRef.current) return;
+    submittingRef.current = true;
+    // The confirm dialog (if open) stays up showing "Submitting..." until we navigate away;
+    // grading can take a few seconds while written answers are checked.
     setSubmitting(true);
+    setSubmitError(null);
+
+    const failSubmission = (message) => {
+      submittingRef.current = false;
+      setSubmitting(false);
+      setConfirmSubmit(false);
+      setSubmitError(message);
+    };
+
+    // Get the authentication token
+    const token = localStorage.getItem('token');
+    if (!token) {
+      failSubmission('Authentication required. Please log in.');
+      return;
+    }
+
+    const submittedAnswers = answersRef.current;
+    // Time spent in seconds, capped at the time limit
+    const limitMinutes = Number(currentAssessment.timeLimit);
+    const elapsed = startTimeRef.current ? Math.round((Date.now() - startTimeRef.current) / 1000) : 0;
+    const timeSpent = limitMinutes > 0 ? Math.min(elapsed, Math.round(limitMinutes * 60)) : elapsed;
+    const submittedAssessmentId = currentAssessment.id || currentAssessment._id;
+
     try {
-      // Get the authentication token
-      const token = localStorage.getItem('token');
-      if (!token) {
-        setError('Authentication required. Please log in.');
-        setSubmitting(false);
-        return;
-      }
-
-      // Calculate time spent
-      const timeSpent = assessment.timeLimit * 60 - timeRemaining;
-
-      console.log('Submitting assessment:', {
-        assessmentId: assessment.id || assessment._id,
-        answers,
-        timeSpent
-      });
-
       // Submit to backend API
       const response = await axios.post('/api/student/assessment/submit', {
-        assessmentId: assessment.id || assessment._id,
-        answers,
+        assessmentId: submittedAssessmentId,
+        answers: submittedAnswers,
         timeSpent
       }, {
         headers: {
@@ -346,107 +471,84 @@ const AssessmentTake = () => {
         }
       });
 
-      console.log('Submission response:', response.data);
-
-      if (!response.data.success) {
-        setError(response.data.message || 'Failed to submit assessment (backend error).');
-        setSubmitting(false);
+      const data = response.data || {};
+      if (!data.success) {
+        failSubmission(data.message || 'Failed to submit assessment (backend error).');
         return;
       }
-      let score = response.data.score;
-      let maxScore = response.data.maxScore;
-      let submissionId = response.data.submissionId;
 
-      // If no score provided (manual grading needed), calculate a tentative score
-      if (!score) {
-        score = 0;
-        maxScore = 0;
-        assessment.questions.forEach(question => {
-          maxScore += question.points;
-          const userAnswer = answers[question.id];
-          if (!userAnswer) return;
-          if (question.type === 'multiple-choice' || question.type === 'true-false') {
-            if (userAnswer === question.correctAnswer) {
-              score += question.points;
-            }
-          } else if (question.type === 'multiple-select') {
-            if (userAnswer.length === question.correctAnswer.length && userAnswer.every(a => question.correctAnswer.includes(a))) {
-              score += question.points;
-            }
-          } else if (question.type === 'short-answer') {
-            if (userAnswer.length > 10) {
-              score += question.points * 0.8;
-            }
-          }
-        });
-      }
+      const questionPoints = currentAssessment.questions.reduce((sum, q) => sum + (q.points || 0), 0);
+      const maxScore = Number(data.maxScore) || questionPoints;
+      const score = Number(data.score) || 0;
+      const percentage = data.percentage ?? (maxScore > 0 ? Math.round((score / maxScore) * 100) : 0);
+      const isPassed = data.isPassed ?? percentage >= PASS_THRESHOLD;
+      const submissionId = data.submissionId || 'temp';
+
       // Mark assessment as completed (for UI/UX)
+      testActiveRef.current = false;
+      clearAttempt(attemptKeyRef.current);
       setTestStarted(false);
-      // Navigate to results page with proper submission ID and pass/fail info
-      const percentage = response.data.percentage || Math.round((score / maxScore) * 100);
-      const isPassed = response.data.isPassed !== undefined ? response.data.isPassed : percentage >= 50;
-      navigate(`/results/${submissionId || 'temp'}`, {
+      // Replace the history entry so "Back" can't reopen a submitted test
+      navigate(`/results/${submissionId}`, {
+        replace: true,
         state: {
           score,
           maxScore,
           percentage,
           isPassed,
-          answers,
-          assessment,
-          submissionId: submissionId || 'temp',
-          message: response.data.message,
+          answers: submittedAnswers,
+          assessment: currentAssessment,
+          submissionId,
+          timeSpent,
+          submittedAt: new Date().toISOString(),
+          message: data.message,
           completed: true
         }
       });
-    } catch (error) {
-      console.error('Submission error:', error);
-      if (error.response && error.response.data && error.response.data.message) {
-        setError('Failed to submit assessment: ' + error.response.data.message);
-      } else {
-        setError('Failed to submit assessment. Please try again.');
-      }
-      setSubmitting(false);
+    } catch (submitErr) {
+      console.error('Submission error:', submitErr);
+      const serverMessage = submitErr.response?.data?.message;
+      failSubmission(serverMessage
+        ? `Failed to submit assessment: ${serverMessage}`
+        : 'Failed to submit assessment. Please try again.');
     }
-  };
+  }, [navigate]);
   
   // Render the current question
-  const renderQuestion = () => {
-    const question = assessment.questions[currentQuestionIndex];
-    
+  const renderQuestion = (question) => {
     switch (question.type) {
       case 'multiple-choice':
         return (
           <RadioGroup
-            value={answers[question.id] || ''}
-            onChange={(e) => handleAnswerChange(e.target.value)}
+            value={answers[question.id] ?? ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
           >
             {question.options.map((option, index) => (
               <FormControlLabel
                 key={index}
                 value={option}
                 control={<Radio />}
-                label={option}
+                label={<InlineCode text={option} />}
               />
             ))}
           </RadioGroup>
         );
         
       case 'true-false':
+        // Stored as the option text ("True"/"False"), which is what the backend compares against.
         return (
           <RadioGroup
-            value={answers[question.id]?.toString() || ''}
-            onChange={(e) => handleAnswerChange(e.target.value === 'true')}
+            value={answers[question.id] ?? ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
           >
-            <FormControlLabel
-              value="true"
-              control={<Radio />}
-              label="True"
-            />
-            <FormControlLabel
-              value="false"
-              control={<Radio />}
-              label="False"
-            />
+            {question.options.map((option, index) => (
+              <FormControlLabel
+                key={index}
+                value={option}
+                control={<Radio />}
+                label={<InlineCode text={option} />}
+              />
+            ))}
           </RadioGroup>
         );
         
@@ -458,12 +560,13 @@ const AssessmentTake = () => {
             rows={4}
             variant="outlined"
             placeholder="Enter your answer here..."
-            value={answers[question.id] || ''}
-            onChange={(e) => handleAnswerChange(e.target.value)}
+            value={answers[question.id] ?? ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
           />
         );
         
-      case 'multiple-select':
+      case 'multiple-select': {
+        const selections = Array.isArray(answers[question.id]) ? answers[question.id] : [];
         return (
           <FormGroup>
             {question.options.map((option, index) => (
@@ -471,22 +574,16 @@ const AssessmentTake = () => {
                 key={index}
                 control={
                   <Checkbox
-                    checked={(answers[question.id] || []).includes(option)}
-                    onChange={(e) => {
-                      const currentSelections = answers[question.id] || [];
-                      if (e.target.checked) {
-                        handleAnswerChange([...currentSelections, option]);
-                      } else {
-                        handleAnswerChange(currentSelections.filter(item => item !== option));
-                      }
-                    }}
+                    checked={selections.includes(option)}
+                    onChange={(e) => handleMultiSelectChange(question.id, option, e.target.checked)}
                   />
                 }
-                label={option}
+                label={<InlineCode text={option} />}
               />
             ))}
           </FormGroup>
         );
+      }
         
       default:
         return <Alert severity="error">Unsupported question type</Alert>;
@@ -552,6 +649,14 @@ const AssessmentTake = () => {
     );
   }
   
+  const totalQuestions = assessment.questions.length;
+  const answeredCount = assessment.questions.reduce(
+    (count, question) => count + (isAnswered(answers[question.id]) ? 1 : 0),
+    0
+  );
+  // Calculate progress percentage
+  const progressPercentage = totalQuestions > 0 ? (answeredCount / totalQuestions) * 100 : 0;
+
   if (!testStarted) {
     return (
       <Container maxWidth="md" sx={{ mt: 4 }}>
@@ -584,7 +689,7 @@ const AssessmentTake = () => {
                   </ListItemIcon>
                   <ListItemText 
                     primary="Total Points" 
-                    secondary={assessment.totalPoints} 
+                    secondary={assessment.totalPoints ?? assessment.questions.reduce((sum, q) => sum + (q.points || 0), 0)}
                   />
                 </ListItem>
                 <ListItem>
@@ -606,7 +711,7 @@ const AssessmentTake = () => {
                   </ListItemIcon>
                   <ListItemText 
                     primary="Questions" 
-                    secondary={assessment.questions.length} 
+                    secondary={totalQuestions}
                   />
                 </ListItem>
                 <ListItem>
@@ -615,7 +720,7 @@ const AssessmentTake = () => {
                   </ListItemIcon>
                   <ListItemText 
                     primary="Due Date" 
-                    secondary={new Date(assessment.dueDate).toLocaleString()} 
+                    secondary={assessment.dueDate ? new Date(assessment.dueDate).toLocaleString() : 'No due date'}
                   />
                 </ListItem>
               </List>
@@ -632,6 +737,18 @@ const AssessmentTake = () => {
           <Alert severity="warning" sx={{ mt: 2 }}>
             This assessment will require full screen mode and camera proctoring. Exiting full screen or disabling the camera will be flagged as a violation.
           </Alert>
+          {totalQuestions === 0 && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              This assessment does not contain any questions yet.
+            </Alert>
+          )}
+          {savedAttempt && (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              You have an attempt in progress. Your answers were saved
+              {savedAttempt.endTime ? ' and the timer kept running while you were away' : ''}.
+              {' '}Violations recorded so far: {Number(savedAttempt.violationCount) || 0} / {VIOLATION_THRESHOLD}.
+            </Alert>
+          )}
           <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 4 }}>
             <Button 
               variant="outlined" 
@@ -643,8 +760,9 @@ const AssessmentTake = () => {
               variant="contained" 
               color="primary" 
               onClick={startTest}
+              disabled={totalQuestions === 0}
             >
-              Begin Assessment
+              {savedAttempt ? 'Resume Assessment' : 'Begin Assessment'}
             </Button>
           </Box>
         </Paper>
@@ -652,18 +770,61 @@ const AssessmentTake = () => {
     );
   }
   
+  const currentQuestion = assessment.questions[Math.min(currentQuestionIndex, totalQuestions - 1)];
+  const isCurrentFlagged = flaggedQuestions.includes(currentQuestion.id);
+
   return (
-    <Container id="assessment-fullscreen-container" maxWidth="lg" sx={{ py: 4 }} ref={containerRef}>
+    <Container
+      id="assessment-fullscreen-container"
+      maxWidth="lg"
+      ref={containerRef}
+      sx={{
+        pt: 4,
+        // Leave room for the fixed webcam preview in the bottom-right corner.
+        pb: 18,
+        // In element full screen the browser shows a black backdrop and the page can't
+        // scroll, so give the container its own background and scrolling.
+        '&:fullscreen': { bgcolor: 'background.default', overflowY: 'auto' },
+        '&:-webkit-full-screen': { bgcolor: 'background.default', overflowY: 'auto' }
+      }}
+    >
       {/* Proctoring webcam and violation alerts */}
-      <ProctoringWebcam onViolation={handleProctorViolation} />
+      <ProctoringWebcam onViolation={handleProctorViolation} onRecover={handleProctorRecover} />
       {(fullscreenViolation || proctorViolation || violationCount > 0) && (
-        <Alert severity={violationCount >= VIOLATION_THRESHOLD ? 'error' : 'warning'} sx={{ position: 'fixed', top: 120, right: 20, zIndex: 9999, width: 340 }}>
+        <Alert severity={violationCount >= VIOLATION_THRESHOLD ? 'error' : 'warning'} sx={{ position: 'fixed', top: 120, right: 20, zIndex: 1200, width: { xs: 'calc(100% - 40px)', sm: 340 } }}>
           <div>
-            {fullscreenViolation && <div>You have exited full screen mode. Please return to full screen.</div>}
+            {fullscreenViolation && (
+              <div>
+                You have exited full screen mode. Please return to full screen.
+                <Box sx={{ mt: 1, mb: 1 }}>
+                  <Button size="small" variant="outlined" color="inherit" onClick={handleReturnToFullscreen}>
+                    Return to full screen
+                  </Button>
+                </Box>
+              </div>
+            )}
             {proctorViolation && <div>Camera not detected or interrupted. Please enable your camera.</div>}
             <div>Violation Count: {violationCount} / {VIOLATION_THRESHOLD}</div>
             {violationCount >= VIOLATION_THRESHOLD && <div>Exam terminated due to repeated violations.</div>}
           </div>
+        </Alert>
+      )}
+      {submitting && !confirmSubmit && (
+        <Alert severity="info" icon={<CircularProgress size={20} />} sx={{ mb: 2 }}>
+          Submitting your answers...
+        </Alert>
+      )}
+      {submitError && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={handleSubmitAssessment} disabled={submitting}>
+              Retry
+            </Button>
+          }
+        >
+          {submitError}
         </Alert>
       )}
       <Paper elevation={3} sx={{ p: 3, mb: 2, borderRadius: 2 }}>
@@ -671,13 +832,8 @@ const AssessmentTake = () => {
           <Typography variant="h5">
             {assessment.title}
           </Typography>
-          {timeRemaining !== null && (
-            <Chip 
-              icon={<AccessTimeIcon />} 
-              label={`Time remaining: ${formatTime(timeRemaining)}`}
-              color={timeRemaining < 300 ? 'error' : 'default'}
-              variant="outlined"
-            />
+          {endTime !== null && (
+            <MemoCountdownChip endTime={endTime} onExpire={handleSubmitAssessment} />
           )}
         </Box>
       </Paper>
@@ -687,22 +843,22 @@ const AssessmentTake = () => {
           <Paper elevation={3} sx={{ p: 3, borderRadius: 2 }}>
             <Box sx={{ mb: 3 }}>
               <Typography variant="h6" gutterBottom>
-                Question {currentQuestionIndex + 1} of {assessment.questions.length}
+                Question {currentQuestionIndex + 1} of {totalQuestions}
               </Typography>
               <LinearProgress 
                 variant="determinate" 
-                value={progressPercentage()} 
+                value={progressPercentage}
                 sx={{ mb: 2 }}
               />
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Typography variant="body2" color="text.secondary">
-                  {Math.round(progressPercentage())}% Complete
+                  {Math.round(progressPercentage)}% Complete
                 </Typography>
                 <Box>
                   <IconButton
                     onClick={toggleFlagged}
-                    color={flaggedQuestions.includes(assessment.questions[currentQuestionIndex].id) ? 'error' : 'default'}
-                    title={flaggedQuestions.includes(assessment.questions[currentQuestionIndex].id) ? 'Unflag question' : 'Flag for review'}
+                    color={isCurrentFlagged ? 'error' : 'default'}
+                    title={isCurrentFlagged ? 'Unflag question' : 'Flag for review'}
                   >
                     <FlagIcon />
                   </IconButton>
@@ -713,10 +869,10 @@ const AssessmentTake = () => {
             <Card variant="outlined" sx={{ mb: 3 }}>
               <CardContent>
                 <Typography variant="body1" sx={{ mb: 2 }}>
-                  {assessment.questions[currentQuestionIndex].text}
+                  <InlineCode text={currentQuestion.text} />
                 </Typography>
                 <Box sx={{ mt: 2 }}>
-                  {renderQuestion()}
+                  {renderQuestion(currentQuestion)}
                 </Box>
               </CardContent>
             </Card>
@@ -730,7 +886,7 @@ const AssessmentTake = () => {
               >
                 Previous
               </Button>
-              {currentQuestionIndex < assessment.questions.length - 1 ? (
+              {currentQuestionIndex < totalQuestions - 1 ? (
                 <Button
                   variant="contained"
                   endIcon={<ArrowForwardIcon />}
@@ -743,6 +899,7 @@ const AssessmentTake = () => {
                   variant="contained"
                   color="primary"
                   onClick={handleOpenSubmitDialog}
+                  disabled={submitting}
                 >
                   Submit Assessment
                 </Button>
@@ -763,7 +920,7 @@ const AssessmentTake = () => {
                     variant={currentQuestionIndex === index ? 'contained' : 'outlined'}
                     color={
                       flaggedQuestions.includes(question.id) ? 'error' :
-                      answers[question.id] ? 'success' : 'primary'
+                      isAnswered(answers[question.id]) ? 'success' : 'primary'
                     }
                     onClick={() => setCurrentQuestionIndex(index)}
                     sx={{ minWidth: 40, height: 40, p: 0 }}
@@ -800,8 +957,8 @@ const AssessmentTake = () => {
       <Dialog
         open={confirmSubmit}
         onClose={handleCloseSubmitDialog}
-        container={document.getElementById('assessment-fullscreen-container') || undefined}
-        // Ensures dialog is rendered inside fullscreen container
+        // Render inside the full screen container, otherwise it is hidden behind it
+        container={() => containerRef.current}
       >
         <DialogTitle>Submit Assessment?</DialogTitle>
         <DialogContent>
@@ -810,13 +967,13 @@ const AssessmentTake = () => {
           </DialogContentText>
           <Box sx={{ mt: 2 }}>
             <Typography variant="body2">
-              Total questions: {assessment.questions.length}
+              Total questions: {totalQuestions}
             </Typography>
             <Typography variant="body2">
-              Answered questions: {Object.keys(answers).length}
+              Answered questions: {answeredCount}
             </Typography>
             <Typography variant="body2">
-              Unanswered questions: {assessment.questions.length - Object.keys(answers).length}
+              Unanswered questions: {totalQuestions - answeredCount}
             </Typography>
             <Typography variant="body2">
               Flagged questions: {flaggedQuestions.length}
@@ -824,14 +981,11 @@ const AssessmentTake = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseSubmitDialog}>
+          <Button onClick={handleCloseSubmitDialog} disabled={submitting}>
             Continue Editing
           </Button>
           <Button
-            onClick={() => {
-              console.log('Submit Assessment button pressed');
-              handleSubmitAssessment();
-            }}
+            onClick={handleSubmitAssessment}
             variant="contained"
             color="primary"
             disabled={submitting}

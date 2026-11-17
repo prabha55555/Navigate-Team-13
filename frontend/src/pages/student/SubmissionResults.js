@@ -8,8 +8,7 @@ import {
     ManageSearch as ManageSearchIcon,
     PsychologyAlt as PsychologyAltIcon,
     School as SchoolIcon,
-    TrendingUp as TargetIcon,
-    Timeline as TimelineIcon
+    TrendingUp as TargetIcon
 } from '@mui/icons-material';
 import {
     Alert,
@@ -38,90 +37,121 @@ import {
     Tabs,
     Typography
 } from '@mui/material';
+import axios from 'axios';
+import InlineCode from '../../components/common/InlineCode';
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
+import { isAnswered, normalizeQuestions } from '../../services/assessmentTakeLoader';
 
-// Mock submission data
-const mockSubmission = {
-  id: '1',
-  assessment: {
-    id: '1',
-    title: 'Java Data Structures Assessment',
-    courseId: '1',
-    courseName: 'Data Structures and Algorithms in Java',
-    description: 'Comprehensive evaluation of your understanding of Java data structures and collections',
-    timeLimit: 90, // in minutes
-    totalPoints: 100,
-    questions: [
-      {
-        id: 'q1',
-        text: 'Which Java collection interface is implemented by ArrayList and LinkedList?',
-        type: 'multiple-choice',
-        options: ['Set', 'List', 'Queue', 'Map'],
-        correctAnswer: 'List',
-        points: 5      },
-      {
-        id: 'q2',
-        text: 'In Java, which data structure would be most appropriate for implementing a FIFO (First In First Out) queue?',
-        type: 'multiple-choice',
-        options: ['java.util.Stack', 'java.util.LinkedList', 'java.util.TreeSet', 'java.util.HashMap'],
-        correctAnswer: 'java.util.LinkedList',
-        points: 5
-      },
-      {
-        id: 'q3',
-        text: 'Explain the difference between ArrayList and LinkedList in Java regarding performance characteristics.',
-        type: 'short-answer',
-        correctAnswer: 'ArrayList provides O(1) random access but O(n) insertion/deletion at arbitrary positions. LinkedList has O(n) random access but O(1) insertion/deletion at known positions. ArrayList is memory-efficient but requires resizing, while LinkedList uses more memory for node pointers but never needs resizing.',
-        points: 10
-      },
-      {
-        id: 'q4',
-        text: 'Which of the following Java collection classes implement the Set interface? (Select all that apply)',
-        type: 'multiple-select',
-        options: ['HashSet', 'TreeSet', 'LinkedHashSet', 'ArrayList'],
-        correctAnswer: ['HashSet', 'TreeSet', 'LinkedHashSet'],
-        points: 10
-      },
-      {
-        id: 'q5',
-        text: 'True or False: In Java, HashMap allows multiple null keys.',
-        type: 'true-false',
-        correctAnswer: false,
-        points: 5
-      }
-    ]  },
-  student: {
-    id: '1',
-    name: 'Student Name',
-    email: 'student@example.com'
-  },
-  answers: {
-    'q1': 'List',
-    'q2': 'java.util.LinkedList',
-    'q3': 'ArrayList provides fast random access with O(1) time complexity, but insertion and deletion in the middle takes O(n) time. LinkedList has O(n) time for random access, but O(1) time for insertion and deletion at known positions once they are located.',
-    'q4': ['HashSet', 'TreeSet', 'LinkedHashSet'],
-    'q5': false
-  },
-  score: 25,
-  maxScore: 35,
-  submittedAt: '2025-10-12T15:30:00',
-  timeSpent: 42, // in minutes
-  feedback: {
-    overallFeedback: 'Good understanding of Java data structures. Continue practicing with more complex implementations, especially with the Java Collections Framework.',
-    questionFeedback: {
-      'q3': 'Good explanation of the time complexity differences, but could elaborate more on memory usage characteristics.',
-      'q4': 'Excellent understanding of the Set interface implementations.'
-    }
-  },
-  conceptMastery: [
-    { concept: 'Java Collections', masteryLevel: 90 },
-    { concept: 'Java Lists', masteryLevel: 85 },
-    { concept: 'Java Sets', masteryLevel: 75 },
-    { concept: 'Java Maps', masteryLevel: 70 }
-  ]
+const PASS_THRESHOLD = 50;
+
+const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null);
+
+// timeSpent is stored in seconds by the submit endpoint
+const formatDuration = (totalSeconds) => {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${secs}s` : `${secs}s`;
 };
+
+const hasValue = (value) => value !== undefined && value !== null && value !== '';
+
+// Booleans (older submissions) and "True"/"False" strings both display as text
+const formatChoice = (value) => {
+  if (value === true) return 'True';
+  if (value === false) return 'False';
+  return value;
+};
+
+const sameText = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+
+// Grade objective questions in the browser when the server didn't send per-question results
+// (e.g. results opened from navigation state). Returns null when it can't be decided.
+const gradeLocally = (question, userAnswer) => {
+  const { type, correctAnswer, points } = question;
+  if (!hasValue(correctAnswer) || type === 'short-answer') return null;
+  if (!isAnswered(userAnswer)) {
+    return { questionId: question.id, correct: false, score: 0 };
+  }
+  let correct;
+  if (type === 'multiple-select') {
+    const expected = Array.isArray(correctAnswer) ? correctAnswer : [correctAnswer];
+    const given = Array.isArray(userAnswer) ? userAnswer : [userAnswer];
+    correct = expected.length === given.length && expected.every((option) => given.includes(option));
+  } else if (type === 'true-false') {
+    correct = sameText(formatChoice(userAnswer), formatChoice(correctAnswer));
+  } else {
+    correct = userAnswer === correctAnswer;
+  }
+  return { questionId: question.id, correct, score: correct ? points : 0 };
+};
+
+/**
+ * Normalize a submission from either navigation state or GET /api/assessment/results/:id.
+ * Submissions created by /api/student/assessment/submit store per-question results in a
+ * `feedback` array and the raw questions use `question`/`questionType`, so map those here.
+ * Fields missing from `raw` fall back to `fallback` (e.g. the state-built submission).
+ */
+const normalizeSubmission = (raw = {}, fallback = {}) => {
+  const rawAssessment = raw.assessment || {};
+  const fallbackAssessment = fallback.assessment || {};
+  const questionsSource = rawAssessment.questions?.length ? rawAssessment.questions : fallbackAssessment.questions;
+  const questions = normalizeQuestions(questionsSource);
+
+  const answers = firstDefined(raw.answers, fallback.answers) || null;
+  const maxScore = Number(firstDefined(raw.maxScore, fallback.maxScore)) ||
+    questions.reduce((sum, question) => sum + question.points, 0);
+  const score = Number(firstDefined(raw.score, fallback.score)) || 0;
+  const rawPercentage = Number(firstDefined(raw.percentage, fallback.percentage));
+  const percentage = Number.isFinite(rawPercentage)
+    ? rawPercentage
+    : (maxScore > 0 ? Math.round((score / maxScore) * 100) : 0);
+  const isPassed = firstDefined(raw.isPassed, fallback.isPassed) ?? percentage >= PASS_THRESHOLD;
+
+  let questionResults = firstDefined(raw.questionResults, fallback.questionResults) || null;
+  if (!questionResults && Array.isArray(raw.feedback)) {
+    questionResults = raw.feedback.map((item) => ({
+      questionId: item.questionId,
+      correct: item.correct === true,
+      partialCredit: item.correct === 'partial',
+      score: Number(item.points) || 0,
+      feedback: item.feedback
+    }));
+  }
+
+  const objectFeedback = raw.feedback && !Array.isArray(raw.feedback) ? raw.feedback : null;
+
+  return {
+    ...fallback,
+    ...raw,
+    assessment: { ...fallbackAssessment, ...rawAssessment, questions },
+    answers,
+    answersAvailable: answers !== null,
+    score,
+    maxScore,
+    percentage,
+    isPassed,
+    questionResults,
+    feedback: objectFeedback || raw.aiFeedback || fallback.feedback || {},
+    timeSpent: firstDefined(raw.timeSpent, fallback.timeSpent) ?? null,
+    submittedAt: firstDefined(raw.submittedAt, fallback.submittedAt) ?? null,
+    submissionMessage: firstDefined(raw.submissionMessage, fallback.submissionMessage)
+  };
+};
+
+const buildFromState = (state) => normalizeSubmission({
+  assessment: state.assessment,
+  answers: state.answers,
+  score: state.score,
+  maxScore: state.maxScore,
+  percentage: state.percentage,
+  isPassed: state.isPassed,
+  timeSpent: state.timeSpent,
+  submittedAt: state.submittedAt,
+  submissionMessage: state.message,
+  conceptMastery: []
+});
 
 function TabPanel(props) {
   const { children, value, index, ...other } = props;
@@ -147,87 +177,59 @@ const SubmissionResults = () => {
   const { submissionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { currentUser } = useAuth();
-    const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [submission, setSubmission] = useState(null);
   const [activeTab, setActiveTab] = useState(0);
   const [error, setError] = useState(null);
-  // Fetch submission data or use state from previous page
+  const locationState = location.state;
+
+  // Show the summary passed from the previous page immediately, then load the stored
+  // submission (per-question results, correct answers) when there is a real id.
   useEffect(() => {
-    if (location.state?.score !== undefined) {
-      // If navigated from assessment take with state
-      const { score, maxScore, percentage, isPassed, answers, assessment, message } = location.state;
-      
-      // Create a submission object from the state
-      const createdSubmission = {
-        id: submissionId || '1',
-        assessment,
-        student: {
-          id: currentUser?.id || '1',
-          name: currentUser?.name || 'Student Name',
-          email: currentUser?.email || 'student@example.com'
-        },
-        answers,
-        score,
-        maxScore,
-        percentage: percentage || Math.round((score / maxScore) * 100),
-        isPassed: isPassed !== undefined ? isPassed : (percentage || Math.round((score / maxScore) * 100)) >= 50,
-        submissionMessage: message || 'Assessment submitted successfully.',
-        submittedAt: new Date().toISOString(),
-        timeSpent: assessment.timeLimit || 60, // Default to time limit if actual time not tracked
-        feedback: {
-          overallFeedback: isPassed !== undefined ? 
-            (isPassed ? 'Congratulations! You passed this assessment.' : 'You did not meet the passing threshold of 50%. Please review the material and try again.') :
-            'This is automated feedback based on your submission.',
-          questionFeedback: {}
-        },
-        conceptMastery: []
-      };
-      
-      setSubmission(createdSubmission);
+    let cancelled = false;
+    const hasState = locationState?.score !== undefined;
+    setError(null);
+    if (hasState) {
+      setSubmission(buildFromState(locationState));
       setLoading(false);
     } else {
-      // If directly navigated to this page, fetch the submission data from API
-      const fetchSubmissionResults = async () => {
-        try {
-          console.log(`Fetching results for submission: ${submissionId}`);
-          
-          const token = localStorage.getItem('token');
-          if (!token) {
-            setError('Authentication required. Please log in.');
-            setLoading(false);
-            return;
-          }          const response = await fetch(`/api/assessment/results/${submissionId}`, {
-            headers: {
-              'x-auth-token': token,
-              'Content-Type': 'application/json'
-            }
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const data = await response.json();
-          
-          if (!data.success) {
-            throw new Error(data.message || 'Failed to fetch submission results');
-          }
-
-          console.log('Successfully fetched submission results:', data.submission);
-          setSubmission(data.submission);
-          
-        } catch (error) {
-          console.error('Error fetching submission results:', error);
-          setError('Failed to load submission results. Please try again.');
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      fetchSubmissionResults();
+      setSubmission(null);
+      setLoading(true);
     }
-  }, [submissionId, location, currentUser]);
+          
+    const token = localStorage.getItem('token');
+    if (!submissionId || submissionId === 'temp' || !token) {
+      if (!hasState) {
+        if (!token) setError('Authentication required. Please log in.');
+        setLoading(false);
+      }
+      return undefined;
+    }
+
+    axios.get(`/api/assessment/results/${submissionId}`, {
+      headers: { 'x-auth-token': token }
+    })
+      .then((response) => {
+        if (cancelled) return;
+        if (!response.data?.success || !response.data.submission) {
+          throw new Error(response.data?.message || 'Failed to fetch submission results');
+        }
+        setSubmission((prev) => normalizeSubmission(response.data.submission, prev || {}));
+      })
+      .catch((fetchError) => {
+        if (cancelled) return;
+        console.error('Error fetching submission results:', fetchError);
+        // With navigation state the summary is already shown; only fail when there's nothing.
+        if (!hasState) setError('Failed to load submission results. Please try again.');
+      })
+      .finally(() => {
+        if (!cancelled && !hasState) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [submissionId, locationState]);
   
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
@@ -282,7 +284,16 @@ const SubmissionResults = () => {
     );
   }
 
-  const scorePercentage = (submission.score / submission.maxScore) * 100;
+  // Use the server's percentage so the page matches the pass/fail decision
+  const scorePercentage = submission.percentage;
+  const timeLimitMinutes = Number(submission.assessment.timeLimit) || 0;
+  const hasTimeSpent = submission.timeSpent !== null && submission.timeSpent !== undefined;
+  const integrityFlagged = Boolean(
+    submission.plagiarismResults?.isPlagiarismDetected || submission.plagiarismResults?.aiGeneratedContentDetected
+  );
+  const resultsByQuestion = new Map(
+    (submission.questionResults || []).map((result) => [String(result.questionId), result])
+  );
   const scoreColor = 
     scorePercentage >= 90 ? 'success.main' : 
     scorePercentage >= 70 ? 'primary.main' : 
@@ -290,12 +301,7 @@ const SubmissionResults = () => {
 
 // Helper to generate pass/fail messages based on score
 const getSubmissionMessage = () => {
-    if (submission.isPassed !== undefined) {
-        return submission.isPassed
-            ? 'You have successfully met the passing threshold of 50%.'
-            : 'You need at least 50% to pass this assessment. Please review the material and try again.';
-    }
-    return scorePercentage >= 50
+    return submission.isPassed
         ? 'You have successfully met the passing threshold of 50%.'
         : 'You need at least 50% to pass this assessment. Please review the material and try again.';
 };
@@ -339,7 +345,7 @@ return (
                     )}
                     {/* Removed course name to avoid showing placeholder or extra text */}
                     <Typography variant="body2" color="text.secondary">
-                        Submitted: {new Date(submission.submittedAt).toLocaleString()}
+                        Submitted: {submission.submittedAt ? new Date(submission.submittedAt).toLocaleString() : '—'}
                     </Typography>
                 </Grid>
                 <Grid item xs={12} md={5}>
@@ -356,15 +362,9 @@ return (
                         {/* Pass/Fail Status */}
                         <Box sx={{ mb: 2 }}>
                             <Chip 
-                                label={submission.isPassed !== undefined ? 
-                                    (submission.isPassed ? '✓ PASSED' : '✗ FAILED') : 
-                                    (scorePercentage >= 50 ? '✓ PASSED' : '✗ FAILED')
-                                }
-                                color={submission.isPassed !== undefined ? 
-                                    (submission.isPassed ? 'success' : 'error') : 
-                                    (scorePercentage >= 50 ? 'success' : 'error')
-                                }
-                                size="large"
+                                label={submission.isPassed ? '✓ PASSED' : '✗ FAILED'}
+                                color={submission.isPassed ? 'success' : 'error'}
+                                size="medium"
                                 sx={{ 
                                     fontSize: '1.1rem', 
                                     fontWeight: 'bold',
@@ -380,11 +380,13 @@ return (
                                 label={`${submission.assessment.questions.length} Questions`}
                                 variant="outlined" 
                             />
-                            <Chip 
-                                icon={<AccessTimeIcon />} 
-                                label={`${submission.timeSpent} minutes`} 
-                                variant="outlined" 
-                            />
+                            {hasTimeSpent && (
+                                <Chip
+                                    icon={<AccessTimeIcon />}
+                                    label={formatDuration(submission.timeSpent)}
+                                    variant="outlined"
+                                />
+                            )}
                         </Box>
                     </Box>
                 </Grid>
@@ -393,14 +395,12 @@ return (
         
         {/* Pass/Fail Summary Alert */}
         <Alert 
-            severity={submission.isPassed !== undefined ? 
-                (submission.isPassed ? 'success' : 'warning') : 
-                (scorePercentage >= 50 ? 'success' : 'warning')
-            } 
+            severity={submission.isPassed ? 'success' : 'warning'}
             sx={{ mb: 3 }}
         >
             <Typography variant="subtitle1" fontWeight="bold">
-                {submission.submissionMessage || getSubmissionMessage()}
+                {submission.submissionMessage ||
+                    (submission.isPassed ? 'Congratulations! You passed this assessment.' : 'You did not pass this assessment.')}
             </Typography>
             <Typography variant="body2">
                 {getSubmissionMessage()}
@@ -424,11 +424,21 @@ return (
             </Typography>
             {submission.assessment.questions.map((question, index) => {
                 // Safely handle undefined answers
-                const userAnswer = submission.answers && submission.answers[question.id];
-                const questionResult = submission.questionResults?.find(r => r.questionId === question.id);
-                const isCorrect = questionResult?.correct || false;
-                const earnedPoints = questionResult?.score || 0;
+                const userAnswer = submission.answers ? submission.answers[question.id] : undefined;
+                const answered = isAnswered(userAnswer);
+                const questionResult = resultsByQuestion.get(String(question.id)) ||
+                    (submission.answersAvailable ? gradeLocally(question, userAnswer) : null);
+                const isGraded = Boolean(questionResult);
+                const isCorrect = questionResult?.correct === true;
+                const earnedPoints = questionResult?.score ?? 0;
                 const feedback = questionResult?.feedback || '';
+                const hasCorrectAnswer = hasValue(question.correctAnswer);
+                const correctOptions = Array.isArray(question.correctAnswer)
+                    ? question.correctAnswer
+                    : (hasCorrectAnswer ? [question.correctAnswer] : []);
+                const noAnswer = submission.answersAvailable
+                    ? <em>No answer provided</em>
+                    : <em>Answer not available</em>;
 
                 return (
                     <Card key={question.id} variant="outlined" sx={{ mb: 3 }}>
@@ -438,15 +448,23 @@ return (
                                     Question {index + 1}
                                 </Typography>
                                 <Box>
+                                    {isGraded ? (
+                                        <Chip
+                                            icon={isCorrect ? <CheckCircleIcon /> : <CancelIcon />}
+                                            label={isCorrect ? 'Correct' : questionResult?.partialCredit ? 'Partial Credit' : 'Incorrect'}
+                                            color={isCorrect ? 'success' : questionResult?.partialCredit ? 'warning' : 'error'}
+                                            size="small"
+                                            sx={{ mr: 1 }}
+                                        />
+                                    ) : (
+                                        <Chip
+                                            label="Not graded"
+                                            size="small"
+                                            sx={{ mr: 1 }}
+                                        />
+                                    )}
                                     <Chip
-                                        icon={isCorrect ? <CheckCircleIcon /> : <CancelIcon />}
-                                        label={isCorrect ? 'Correct' : questionResult?.partialCredit ? 'Partial Credit' : 'Incorrect'}
-                                        color={isCorrect ? 'success' : questionResult?.partialCredit ? 'warning' : 'error'}
-                                        size="small"
-                                        sx={{ mr: 1 }}
-                                    />
-                                    <Chip
-                                        label={`${earnedPoints}/${question.points} pts`}
+                                        label={isGraded ? `${earnedPoints}/${question.points} pts` : `${question.points} pts`}
                                         variant="outlined"
                                         size="small"
                                     />
@@ -454,11 +472,11 @@ return (
                             </Box>
 
                             <Typography variant="body1" paragraph>
-                                {question.text}
+                                <InlineCode text={question.text} />
                             </Typography>
 
                             {/* Show options for multiple choice */}
-                            {question.type === 'multiple-choice' && question.options && (
+                            {question.type === 'multiple-choice' && question.options.length > 0 && (
                                 <Box sx={{ mb: 2 }}>
                                     <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                                         Options:
@@ -469,7 +487,7 @@ return (
                                                 <ListItemText
                                                     primary={`${String.fromCharCode(65 + idx)}. ${option}`}
                                                     sx={{
-                                                        color: option === question.correctAnswer ? 'success.main' :
+                                                        color: hasCorrectAnswer && option === question.correctAnswer ? 'success.main' :
                                                             option === userAnswer ? 'error.main' : 'inherit'
                                                     }}
                                                 />
@@ -488,44 +506,38 @@ return (
                                     </Typography>
 
                                     {/* Render user answer based on question type */}
-                                    {question.type === 'multiple-choice' && (
+                                    {(question.type === 'multiple-choice' || question.type === 'true-false') && (
                                         <Typography variant="body1" sx={{
-                                            color: userAnswer === question.correctAnswer ? 'success.main' : 'error.main',
+                                            color: !answered || !isGraded ? 'text.primary' : isCorrect ? 'success.main' : 'error.main',
                                             fontWeight: 'medium'
                                         }}>
-                                            {userAnswer || <em>No answer provided</em>}
-                                        </Typography>
-                                    )}
-
-                                    {question.type === 'true-false' && (
-                                        <Typography variant="body1" sx={{
-                                            color: String(userAnswer).toLowerCase() === String(question.correctAnswer).toLowerCase() ? 'success.main' : 'error.main',
-                                            fontWeight: 'medium'
-                                        }}>
-                                            {userAnswer === true ? 'True' : userAnswer === false ? 'False' : <em>No answer provided</em>}
+                                            {answered ? formatChoice(userAnswer) : noAnswer}
                                         </Typography>
                                     )}
 
                                     {question.type === 'short-answer' && (
                                         <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
-                                            {userAnswer || <em>No answer provided</em>}
+                                            {answered ? String(userAnswer) : noAnswer}
                                         </Typography>
                                     )}
 
                                     {question.type === 'multiple-select' && (
                                         <List dense>
-                                            {userAnswer && userAnswer.length > 0 ? (
-                                                userAnswer.map((option, idx) => (
+                                            {answered ? (
+                                                (Array.isArray(userAnswer) ? userAnswer : [userAnswer]).map((option, idx) => (
                                                     <ListItem key={idx}>
                                                         <ListItemIcon sx={{ minWidth: 28 }}>
-                                                            <CheckCircleIcon color={question.correctAnswer.includes(option) ? 'success' : 'error'} fontSize="small" />
+                                                            <CheckCircleIcon
+                                                                color={!hasCorrectAnswer ? 'action' : correctOptions.includes(option) ? 'success' : 'error'}
+                                                                fontSize="small"
+                                                            />
                                                         </ListItemIcon>
                                                         <ListItemText primary={option} />
                                                     </ListItem>
                                                 ))
                                             ) : (
                                                 <ListItem>
-                                                    <ListItemText primary={<em>No answer provided</em>} />
+                                                    <ListItemText primary={noAnswer} />
                                                 </ListItem>
                                             )}
                                         </List>
@@ -537,27 +549,27 @@ return (
                                         Correct Answer:
                                     </Typography>
 
-                                    {question.type === 'multiple-choice' && (
-                                        <Typography variant="body1" color="success.main" fontWeight="medium">
-                                            {question.correctAnswer}
+                                    {!hasCorrectAnswer && (
+                                        <Typography variant="body1" color="text.secondary">
+                                            <em>Not available</em>
                                         </Typography>
                                     )}
 
-                                    {question.type === 'true-false' && (
+                                    {hasCorrectAnswer && (question.type === 'multiple-choice' || question.type === 'true-false') && (
                                         <Typography variant="body1" color="success.main" fontWeight="medium">
-                                            {question.correctAnswer ? 'True' : 'False'}
+                                            {formatChoice(question.correctAnswer)}
                                         </Typography>
                                     )}
 
-                                    {question.type === 'short-answer' && (
+                                    {hasCorrectAnswer && question.type === 'short-answer' && (
                                         <Typography variant="body1" color="text.secondary" sx={{ whiteSpace: 'pre-wrap' }}>
-                                            <em>Sample answer:</em> {question.correctAnswer}
+                                            <em>Sample answer:</em> {String(question.correctAnswer)}
                                         </Typography>
                                     )}
 
-                                    {question.type === 'multiple-select' && (
+                                    {hasCorrectAnswer && question.type === 'multiple-select' && (
                                         <List dense>
-                                            {question.correctAnswer.map((option, idx) => (
+                                            {correctOptions.map((option, idx) => (
                                                 <ListItem key={idx}>
                                                     <ListItemIcon sx={{ minWidth: 28 }}>
                                                         <CheckCircleIcon color="success" fontSize="small" />
@@ -630,7 +642,7 @@ return (
                                 Time Spent:
                             </Typography>
                             <Typography variant="body1" fontWeight="bold">
-                                {submission.timeSpent} minutes
+                                {hasTimeSpent ? formatDuration(submission.timeSpent) : '—'}
                             </Typography>
                         </Box>
                         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1 }}>
@@ -638,17 +650,19 @@ return (
                                 Time Limit:
                             </Typography>
                             <Typography variant="body1">
-                                {submission.assessment.timeLimit} minutes
+                                {timeLimitMinutes > 0 ? `${timeLimitMinutes} minutes` : 'No time limit'}
                             </Typography>
                         </Box>
-                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1 }}>
-                            <Typography variant="body1">
-                                Time Utilization:
-                            </Typography>
-                            <Typography variant="body1" fontWeight="bold" color={submission.timeSpent <= submission.assessment.timeLimit ? 'success.main' : 'error.main'}>
-                                {Math.round((submission.timeSpent / submission.assessment.timeLimit) * 100)}%
-                            </Typography>
-                        </Box>
+                        {timeLimitMinutes > 0 && hasTimeSpent && (
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1 }}>
+                                <Typography variant="body1">
+                                    Time Utilization:
+                                </Typography>
+                                <Typography variant="body1" fontWeight="bold" color={submission.timeSpent <= timeLimitMinutes * 60 ? 'success.main' : 'error.main'}>
+                                    {Math.round((submission.timeSpent / (timeLimitMinutes * 60)) * 100)}%
+                                </Typography>
+                            </Box>
+                        )}
                     </Paper>
                 </Grid>
                 
@@ -1064,12 +1078,16 @@ return (
                     </Grid>
                     
                     <Grid item xs={12}>
-                        <Alert severity="success" sx={{ mt: 2 }}>
+                        <Alert severity={integrityFlagged ? 'warning' : 'success'} sx={{ mt: 2 }}>
                             <Typography variant="subtitle1" gutterBottom>
-                                <Box component="span" fontWeight="bold">Academic Integrity Status: Passed</Box>
+                                <Box component="span" fontWeight="bold">
+                                    Academic Integrity Status: {integrityFlagged ? 'Review Required' : 'Passed'}
+                                </Box>
                             </Typography>
                             <Typography variant="body2">
-                                Your submission meets all academic integrity requirements. The analysis indicates that this is your original work with no signs of plagiarism or AI-generated content.
+                                {integrityFlagged
+                                    ? 'Parts of your submission were flagged by the integrity checks above and may be reviewed by your instructor.'
+                                    : 'Your submission meets all academic integrity requirements. The analysis indicates that this is your original work with no signs of plagiarism or AI-generated content.'}
                             </Typography>
                         </Alert>
                     </Grid>

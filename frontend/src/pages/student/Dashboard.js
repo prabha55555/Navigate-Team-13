@@ -26,8 +26,26 @@ import {
 } from '@mui/material';
 import axios from 'axios';
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
+import { useLocation, useNavigate } from 'react-router-dom';
+
+// Relative by default so requests go through the dev proxy / same origin in production
+const API_URL = process.env.REACT_APP_API_URL || '/api';
+
+// Shown only when neither the courses API nor any assessment provides a course
+const FALLBACK_COURSES = [
+  {
+    _id: '1',
+    title: 'Data Structures and Algorithms',
+    description: 'Introduction to fundamental data structures and algorithms used in computer science.',
+    progress: 65
+  },
+  {
+    _id: '2',
+    title: 'Web Development',
+    description: 'Learn modern web development techniques using React, Node.js, and related technologies.',
+    progress: 40
+  }
+];
 
 // Utility function to check if an assessment is new (less than 3 days old)
 const isNewAssessment = (dueDate) => {
@@ -38,79 +56,52 @@ const isNewAssessment = (dueDate) => {
   return diffDays <= 3;
 };
 
-const Dashboard = () => {
-  const [courses, setCourses] = useState([]);
-  const [upcomingAssessments, setUpcomingAssessments] = useState([]);
-  const [recentSubmissions, setRecentSubmissions] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
   
-  const { currentUser } = useAuth();
-  const navigate = useNavigate();
+// The upcoming endpoint returns the stored assessment (questions included) but no
+// questionCount, and totalPoints may be missing for instructor-saved assessments.
+const normalizeAssessment = (assessment) => {
+  const questions = Array.isArray(assessment.questions) ? assessment.questions : [];
+  return {
+    ...assessment,
+    _id: assessment.id || assessment._id,
+    title: assessment.title || 'Untitled Assessment',
+    course: assessment.course || {
+      title: assessment.courseName || 'Unknown Course',
+      _id: assessment.courseId || 'unknown'
+    },
+    questionCount: assessment.questionCount ?? questions.length,
+    totalPoints: assessment.totalPoints ??
+      questions.reduce((sum, q) => sum + (Number(q.points || q.pointsPerQuestion) || 1), 0),
+    isNew: isNewAssessment(assessment.createdAt || assessment.dueDate)
+  };
+};
 
-  useEffect(() => {
-    const fetchDashboardData = async () => {
-      setLoading(true);
-      try {
-        // Configure API with auth token
-        const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
-        const token = localStorage.getItem('token');
-        const api = axios.create({
-          baseURL: API_URL,
-          headers: { 'x-auth-token': token }
-        });
+// Enrolled courses plus any course the student has assessments in (the mock course
+// list on the backend doesn't include the courses instructors assign assessments to).
+const buildCourseList = (apiCourses, assessments) => {
+  const coursesById = new Map();
+  (apiCourses || []).forEach((course) => {
+    const id = course._id || course.id;
+    if (id) coursesById.set(String(id), { ...course, _id: id, progress: Number(course.progress) || 0 });
+  });
+  assessments.forEach((assessment) => {
+    const courseId = assessment.course?._id;
+    if (!courseId || courseId === 'unknown' || coursesById.has(String(courseId))) return;
+    const courseAssessments = assessments.filter((a) => String(a.course?._id) === String(courseId));
+    const completed = courseAssessments.filter((a) => a.status === 'completed').length;
+    coursesById.set(String(courseId), {
+      _id: courseId,
+      title: assessment.course.title || 'Course',
+      description: `${plural(courseAssessments.length, 'assessment')} assigned to you.`,
+      progress: Math.round((completed / courseAssessments.length) * 100)
+    });
+  });
+  if (coursesById.size === 0 && !apiCourses) return FALLBACK_COURSES;
+  return Array.from(coursesById.values());
+};
 
-        // Try to fetch course data
-        try {
-          const coursesResponse = await api.get('/courses/enrolled');
-          setCourses(coursesResponse.data.courses);
-        } catch (courseError) {
-          console.warn('Courses API fetch failed:', courseError);
-          // Use mock course data
-          setCourses([
-            {
-              _id: '1',
-              title: 'Data Structures and Algorithms',
-              description: 'Introduction to fundamental data structures and algorithms used in computer science.',
-              progress: 65
-            },
-            {
-              _id: '2',
-              title: 'Web Development',
-              description: 'Learn modern web development techniques using React, Node.js, and related technologies.',
-              progress: 40
-            }
-          ]);
-        }        // Fetch upcoming assessments
-        try {
-          console.log('=== FETCHING ASSESSMENTS FOR STUDENT DASHBOARD ===');
-          const assessmentsResponse = await api.get('/student/assessment/upcoming');
-          
-          if (assessmentsResponse.data.success && Array.isArray(assessmentsResponse.data.assessments)) {
-            // Filter out any null or undefined assessments
-            const validAssessments = assessmentsResponse.data.assessments
-              .filter(assessment => assessment && assessment.title);
-            
-            // Mark assessments as new if they were created in the last 3 days
-            const assessmentsWithNewFlag = validAssessments.map(assessment => ({
-              ...assessment,
-              _id: assessment.id || assessment._id || `assessment-${Date.now()}`,
-              title: assessment.title || 'Untitled Assessment',
-              course: assessment.course || { 
-                title: assessment.courseName || 'Unknown Course', 
-                _id: assessment.courseId || 'unknown' 
-              },
-              isNew: isNewAssessment(assessment.createdAt || assessment.dueDate)
-            }));
-            
-            console.log(`Loaded ${assessmentsWithNewFlag.length} assessments from API`);
-            setUpcomingAssessments(assessmentsWithNewFlag);
-          } else {
-            throw new Error('Invalid assessment data structure from API');
-          }
-        } catch (assessmentError) {
-          console.warn('Assessment API fetch failed, trying localStorage fallback:', assessmentError);
-          
+const loadFallbackAssessments = () => {
           // Try to get assessments from localStorage as fallback
           let assessmentsFromStorage = [];
           try {
@@ -118,16 +109,12 @@ const Dashboard = () => {
             if (savedAssessmentsString) {
               const savedAssessments = JSON.parse(savedAssessmentsString);
               
-              console.log(`Found ${savedAssessments.length} saved assessments in localStorage`);
-              
               // Filter for assessments that are assigned to students AND visible
               assessmentsFromStorage = savedAssessments
                 .filter(assessment => {
                   const isAssigned = assessment.assignToAllStudents === true;
                   const isVisible = assessment.visibleToStudents === true;
                   const isPublished = assessment.status === 'published' || assessment.isPublished === true;
-                  
-                  console.log(`Assessment "${assessment.title}": assigned=${isAssigned}, visible=${isVisible}, published=${isPublished}`);
                   
                   return isAssigned && isVisible && isPublished;
                 })
@@ -184,46 +171,97 @@ const Dashboard = () => {
             isNew: isNewAssessment(assessment.createdAt || assessment.dueDate)
           }));
           
-          setUpcomingAssessments(mockAssessmentsWithNewFlag);
-        }
+          return mockAssessmentsWithNewFlag;
+};
 
-        // Try to fetch submissions
-        try {
-          const submissionsResponse = await api.get('/submissions/recent');
-          setRecentSubmissions(submissionsResponse.data.submissions);
-        } catch (submissionError) {
-          console.warn('Submissions API fetch failed:', submissionError);
-          // Use mock submission data
-          setRecentSubmissions([
-            {
-              _id: 's1',
-              assessment: { title: 'Practice Quiz' },
-              course: { title: 'Data Structures and Algorithms' },
-              submittedAt: new Date(Date.now() - 86400000 * 1).toISOString(), // 1 day ago
-              score: 85,
-              maxScore: 100
-            },
-            {
-              _id: 's2',
-              assessment: { title: 'HTML Basics' },
-              course: { title: 'Web Development' },
-              submittedAt: new Date(Date.now() - 86400000 * 3).toISOString(), // 3 days ago
-              score: 95,
-              maxScore: 100
-            }
-          ]);
-        }
+const Dashboard = () => {
+  const [courses, setCourses] = useState([]);
+  const [upcomingAssessments, setUpcomingAssessments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
         
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-        setError('Failed to load dashboard data. Please try again later.');
-      } finally {
-        setLoading(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const wasTerminated = Boolean(location.state?.terminated);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchDashboardData = async () => {
+      setLoading(true);
+      const token = localStorage.getItem('token');
+      const config = { headers: { 'x-auth-token': token } };
+
+      // Independent requests run in parallel instead of one after another
+      const [coursesResult, assessmentsResult] = await Promise.allSettled([
+        axios.get(`${API_URL}/curriculum/courses/enrolled`, config),
+        axios.get(`${API_URL}/student/assessment/upcoming`, config)
+      ]);
+      if (cancelled) return;
+
+      let assessments;
+      const assessmentData = assessmentsResult.status === 'fulfilled' ? assessmentsResult.value.data : null;
+      if (assessmentData?.success && Array.isArray(assessmentData.assessments)) {
+        // Filter out any null or undefined assessments
+        assessments = assessmentData.assessments
+          .filter(assessment => assessment && assessment.title)
+          .map(normalizeAssessment);
+      } else {
+        console.warn('Assessment API fetch failed, using localStorage fallback:', assessmentsResult.reason || assessmentData);
+        assessments = loadFallbackAssessments();
       }
+
+      const courseData = coursesResult.status === 'fulfilled' ? coursesResult.value.data : null;
+      const apiCourses = Array.isArray(courseData?.courses) ? courseData.courses : null;
+      if (!apiCourses) {
+        console.warn('Courses API fetch failed:', coursesResult.reason || courseData);
+      }
+
+      setUpcomingAssessments(assessments);
+      setCourses(buildCourseList(apiCourses, assessments));
+      setLoading(false);
     };
 
-    fetchDashboardData();
+    fetchDashboardData().catch((fetchError) => {
+      if (cancelled) return;
+      console.error('Error fetching dashboard data:', fetchError);
+      setError('Failed to load dashboard data. Please try again later.');
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  // Progress summary derived from the student's actual assessments
+  const completedAssessments = upcomingAssessments.filter((a) => a.status === 'completed');
+  const pendingCount = upcomingAssessments.filter((a) => a.status === 'available').length;
+  const completionRate = upcomingAssessments.length
+    ? Math.round((completedAssessments.length / upcomingAssessments.length) * 100)
+    : 0;
+  const scoredPercentages = completedAssessments
+    .map((a) => Number(a.studentSubmission?.percentage))
+    .filter((value) => Number.isFinite(value));
+  const averageScore = scoredPercentages.length
+    ? Math.round(scoredPercentages.reduce((sum, value) => sum + value, 0) / scoredPercentages.length)
+    : null;
+  const passedCount = completedAssessments.filter((a) => a.studentSubmission?.isPassed).length;
+
+  const viewResults = (assessment) => {
+    const submission = assessment.studentSubmission || {};
+    // The upcoming endpoint doesn't return the submission id yet; use it when present.
+    navigate(`/results/${submission.id || submission.submissionId || 'temp'}`, {
+      state: {
+        score: submission.score ?? 0,
+        maxScore: submission.maxScore,
+        percentage: submission.percentage,
+        isPassed: submission.isPassed,
+        submittedAt: submission.submittedAt,
+        assessment
+      }
+    });
+  };
 
   // Render UI
   return (
@@ -231,6 +269,11 @@ const Dashboard = () => {
       {error && (
         <Alert severity="error" sx={{ mb: 4 }}>
           {error}
+        </Alert>
+      )}
+      {wasTerminated && (
+        <Alert severity="error" sx={{ mb: 4 }}>
+          Your last assessment was terminated because of repeated proctoring violations.
         </Alert>
       )}
       
@@ -304,8 +347,8 @@ const Dashboard = () => {
             <Grid container spacing={2}>              {upcomingAssessments.length > 0 ? (
                 upcomingAssessments
                   .filter(assessment => assessment && assessment.title) // Filter out any null/undefined assessments or those without a title
-                  .map((assessment) => (
-                  <Grid item xs={12} key={assessment._id || `assessment-${Math.random()}`}>
+                  .map((assessment, index) => (
+                  <Grid item xs={12} key={assessment._id || `assessment-${index}`}>
                     <Card variant="outlined">
                       <CardContent>                        
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -359,7 +402,7 @@ const Dashboard = () => {
                               Due Date
                             </Typography>
                             <Typography variant="body1">
-                              {new Date(assessment.dueDate).toLocaleDateString()}
+                              {assessment.dueDate ? new Date(assessment.dueDate).toLocaleDateString() : 'No due date'}
                             </Typography>
                           </Grid>
                           <Grid item xs={6} md={3}>
@@ -367,7 +410,7 @@ const Dashboard = () => {
                               Time Limit
                             </Typography>
                             <Typography variant="body1">
-                              {assessment.timeLimit} min
+                              {assessment.timeLimit ? `${assessment.timeLimit} min` : 'None'}
                             </Typography>
                           </Grid>
                           <Grid item xs={6} md={3}>
@@ -381,7 +424,7 @@ const Dashboard = () => {
                             <Typography variant="body2" color="text.secondary">
                               Status
                             </Typography>
-                            <Typography variant="body1">
+                            <Typography variant="body1" component="div">
                               {assessment.status === 'completed' ? (
                                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                                   <Chip 
@@ -417,13 +460,7 @@ const Dashboard = () => {
                             <Button 
                               size="small" 
                               variant="outlined"
-                              onClick={() => navigate(`/results/${assessment.studentSubmission?.submissionId || 'temp'}`, {
-                                state: {
-                                  score: assessment.studentSubmission?.score,
-                                  maxScore: assessment.studentSubmission?.maxScore,
-                                  assessment: assessment
-                                }
-                              })}
+                              onClick={() => viewResults(assessment)}
                               endIcon={<ArrowForwardIcon />}
                               sx={{ flex: 1 }}
                             >
@@ -437,7 +474,7 @@ const Dashboard = () => {
                                 sx={{ alignSelf: 'center' }}
                               />
                             )}
-                            {!assessment.studentSubmission?.isPassed && (
+                            {assessment.studentSubmission && !assessment.studentSubmission.isPassed && (
                               <Chip 
                                 label="✗ Failed" 
                                 color="error" 
@@ -483,7 +520,7 @@ const Dashboard = () => {
               <CardContent>
                 <Box sx={{ mb: 3 }}>
                   <Typography variant="h4" align="center" color="primary" gutterBottom>
-                    78%
+                    {completionRate}%
                   </Typography>
                   <Typography variant="body2" align="center" color="text.secondary">
                     Overall Completion Rate
@@ -498,8 +535,8 @@ const Dashboard = () => {
                       <AssessmentIcon color="primary" />
                     </ListItemIcon>
                     <ListItemText 
-                      primary="5 Assessments Completed" 
-                      secondary="2 Pending" 
+                      primary={`${plural(completedAssessments.length, 'Assessment')} Completed`}
+                      secondary={`${pendingCount} Pending`}
                     />
                   </ListItem>
                   <ListItem>
@@ -507,8 +544,8 @@ const Dashboard = () => {
                       <SchoolIcon color="primary" />
                     </ListItemIcon>
                     <ListItemText 
-                      primary="2 Courses In Progress" 
-                      secondary="25 Modules Completed" 
+                      primary={`${plural(courses.length, 'Course')} In Progress`}
+                      secondary={`${plural(upcomingAssessments.length, 'assessment')} assigned`}
                     />
                   </ListItem>
                   <ListItem>
@@ -516,8 +553,10 @@ const Dashboard = () => {
                       <TimelineIcon color="primary" />
                     </ListItemIcon>
                     <ListItemText 
-                      primary="85% Average Score" 
-                      secondary="5% improvement this month" 
+                      primary={averageScore !== null ? `${averageScore}% Average Score` : 'No scores yet'}
+                      secondary={averageScore !== null
+                        ? `${passedCount} of ${completedAssessments.length} passed`
+                        : 'Complete an assessment to see your average'}
                     />
                   </ListItem>
                 </List>
@@ -526,7 +565,9 @@ const Dashboard = () => {
                   <Button 
                     variant="outlined" 
                     color="primary" 
-                    fullWidth                    onClick={() => navigate('/dashboard')}
+                    fullWidth
+                    disabled={courses.length === 0}
+                    onClick={() => navigate(`/learning-path/${courses[0]._id}`)}
                   >
                     View Detailed Progress
                   </Button>
