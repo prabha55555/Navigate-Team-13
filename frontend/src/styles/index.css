@@ -39,7 +39,33 @@
   --nv-radius-lg: 20px;
   --nv-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
+  --nv-scrollbar: #D3D0C6;
+  --nv-scrollbar-hover: #B9B5A9;
+  --nv-dot-ink: rgba(14, 22, 48, 0.07);
+
   color-scheme: light;
+}
+
+/* Dark mode (set by ColorModeContext on <html data-theme="dark">). Deep ink, not pure black. */
+:root[data-theme="dark"] {
+  --nv-primary: #8391FF;
+  --nv-primary-light: #A9B3FF;
+  --nv-primary-dark: #B4BCFF;
+
+  --nv-canvas: #0A1022;
+  --nv-canvas-deep: #080D1C;
+  --nv-paper: #111933;
+  --nv-sunken: #0D152C;
+  --nv-border: #232D50;
+  --nv-border-strong: #323E68;
+  --nv-text: #E8EBF7;
+  --nv-muted: #A3ABCB;
+
+  --nv-scrollbar: #2C3760;
+  --nv-scrollbar-hover: #46527F;
+  --nv-dot-ink: rgba(232, 235, 247, 0.06);
+
+  color-scheme: dark;
 }
 
 /* ---------- Base (deliberately light: MUI owns component spacing) ---------- */
@@ -87,7 +113,7 @@ a {
 /* ---------- Scrollbars ---------- */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #CFCBC0 transparent;
+  scrollbar-color: var(--nv-scrollbar) transparent;
 }
 
 ::-webkit-scrollbar {
@@ -100,14 +126,14 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #D3D0C6;
+  background: var(--nv-scrollbar);
   border-radius: 10px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #B9B5A9;
+  background: var(--nv-scrollbar-hover);
   background-clip: padding-box;
 }
 
@@ -209,7 +235,7 @@ a {
 
 /* Light-surface dotted texture (canvas sections) */
 .nv-dots-light {
-  background-image: radial-gradient(rgba(14, 22, 48, 0.07) 1px, transparent 1.3px);
+  background-image: radial-gradient(var(--nv-dot-ink) 1px, transparent 1.3px);
   background-size: 22px 22px;
 }
 

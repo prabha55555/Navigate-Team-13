@@ -1,193 +1,201 @@
+import ApartmentRoundedIcon from '@mui/icons-material/ApartmentRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
-import CoPresentOutlinedIcon from '@mui/icons-material/CoPresentOutlined';
-import SchoolOutlinedIcon from '@mui/icons-material/SchoolOutlined';
-import { Alert, Box, Button, CircularProgress, Link, TextField, Typography } from '@mui/material';
+import KeyRoundedIcon from '@mui/icons-material/KeyRounded';
+import { Alert, Box, Button, CircularProgress, InputAdornment, Link, Tab, Tabs, TextField, Typography } from '@mui/material';
 import { alpha } from '@mui/material/styles';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link as RouterLink, useNavigate, useSearchParams } from 'react-router-dom';
-import { homePathFor } from '../../auth/roles';
+import { previewInvite } from '../../api/auth';
+import { roleLabel } from '../../auth/roles';
 import PasswordField from '../../components/common/PasswordField';
+import PasswordStrength, { passwordMeetsPolicy } from '../../components/common/PasswordStrength';
+import { useDebouncedValue } from '../../components/common/hooks';
 import AuthLayout from '../../components/layout/AuthLayout';
 import { useAuth } from '../../contexts/AuthContext';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MIN_PASSWORD = 6;
-
-const ROLES = [
-  {
-    value: 'student',
-    title: 'Student',
-    description: 'Take assessments and follow your adaptive path.',
-    Icon: SchoolOutlinedIcon,
-  },
-  {
-    value: 'instructor',
-    title: 'Instructor',
-    description: 'Build courses, AI assessments and insights.',
-    Icon: CoPresentOutlinedIcon,
-  },
-];
 
 const PANELS = {
-  student: {
-    eyebrow: 'For students',
-    title: 'Every subject becomes a route you can follow.',
+  create: {
+    eyebrow: 'Start free',
+    title: 'Your institution’s assessment home, set up in a minute.',
     bullets: [
-      'Assessments generated from your actual course syllabus.',
-      'Instant auto-grading with clear pass / fail criteria.',
-      'A personalised path to your next checkpoint.',
+      'Free plan: 2 staff seats, 50 students and 25 AI generations a month.',
+      'Invite instructors with a link; students join courses with a 6-letter code.',
+      'Every workspace is isolated — your data is never visible to another institution.',
     ],
   },
-  instructor: {
-    eyebrow: 'For instructors',
-    title: 'From syllabus to assessment in minutes, not evenings.',
+  join: {
+    eyebrow: 'Join your class',
+    title: 'Got a code from your instructor? You’re one step away.',
     bullets: [
-      'Upload a PDF or DOCX — AI extracts topics and outcomes.',
-      'Mix multiple choice, multi-select, true/false and short answer.',
-      'Results, integrity flags and curriculum maps in one place.',
+      'Course codes enrol you straight into the right course.',
+      'Invite links set up staff accounts with the right role.',
+      'Your results and learning path follow you across courses.',
     ],
   },
 };
 
-const validate = ({ name, email, password, confirmPassword }) => ({
-  name: name.trim().length < 2 ? 'Enter your full name.' : '',
-  email: !email.trim()
-    ? 'Enter your email address.'
-    : !EMAIL_PATTERN.test(email.trim())
-      ? 'That doesn’t look like a valid email address.'
-      : '',
-  password: password.length < MIN_PASSWORD ? `Use at least ${MIN_PASSWORD} characters.` : '',
-  confirmPassword: !confirmPassword ? 'Confirm your password.' : confirmPassword !== password ? 'Passwords don’t match.' : '',
-});
-
-const FIELD_ORDER = ['name', 'email', 'password', 'confirmPassword'];
-
-const RoleOption = ({ role, checked, onChange }) => {
-  const { Icon } = role;
+/** Live preview of an invite or course code: "You're joining X as Y". */
+export const CodePreview = ({ preview, loading, error }) => {
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: 'text.secondary', py: 1 }}>
+        <CircularProgress size={14} /> <Typography variant="body2">Checking code…</Typography>
+      </Box>
+    );
+  }
+  if (error) {
+    return (
+      <Alert severity="warning" sx={{ mt: 1 }}>
+        {error}
+      </Alert>
+    );
+  }
+  if (!preview) return null;
   return (
     <Box
-      component="label"
-      sx={(theme) => ({
-        position: 'relative',
+      role="status"
+      sx={(t) => ({
         display: 'flex',
-        flexDirection: 'column',
-        gap: 0.5,
-        p: 1.75,
-        borderRadius: '14px',
-        cursor: 'pointer',
-        border: '1px solid',
-        borderColor: checked ? 'primary.main' : 'divider',
-        bgcolor: checked ? alpha(theme.palette.primary.main, 0.045) : 'background.paper',
-        boxShadow: checked ? `inset 0 0 0 1px ${theme.palette.primary.main}` : '0 1px 1px rgba(14,22,48,0.04)',
-        transition: 'border-color .16s ease, background-color .16s ease, box-shadow .16s ease',
-        '&:hover': { borderColor: checked ? 'primary.main' : 'grey.400' },
-        '&:has(input:focus-visible)': { outline: `2px solid ${theme.palette.primary.main}`, outlineOffset: 2 },
+        gap: 1.5,
+        alignItems: 'flex-start',
+        mt: 1,
+        p: 1.5,
+        borderRadius: 3,
+        border: `1px solid ${alpha(t.palette.success.main, 0.35)}`,
+        bgcolor: alpha(t.palette.success.main, 0.08),
       })}
     >
-      <input
-        type="radio"
-        name="role"
-        value={role.value}
-        checked={checked}
-        onChange={onChange}
-        className="nv-sr-only"
-      />
-      <Box
-        aria-hidden="true"
-        sx={(theme) => ({
-          width: 36,
-          height: 36,
-          mb: 0.75,
-          borderRadius: '10px',
-          display: 'grid',
-          placeItems: 'center',
-          color: checked ? '#fff' : 'primary.main',
-          bgcolor: checked ? 'primary.main' : alpha(theme.palette.primary.main, 0.08),
-          transition: 'background-color .16s ease, color .16s ease',
-        })}
-      >
-        <Icon sx={{ fontSize: 20 }} />
+      <CheckCircleRoundedIcon sx={{ color: 'success.main', mt: 0.25 }} />
+      <Box>
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+          {preview.kind === 'course'
+            ? `You're joining ${preview.course?.title || 'a course'}`
+            : `You're joining ${preview.workspace?.name} as ${/^[aeiou]/i.test(roleLabel(preview.role)) ? 'an' : 'a'} ${roleLabel(preview.role).toLowerCase()}`}
+        </Typography>
+        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+          {preview.kind === 'course' ? `at ${preview.workspace?.name} · as a student` : 'Your account will be added to this workspace.'}
+        </Typography>
       </Box>
-      <Typography component="span" sx={{ fontWeight: 700, fontSize: '0.95rem', lineHeight: 1.3 }}>
-        {role.title}
-      </Typography>
-      <Typography component="span" sx={{ fontSize: '0.8rem', color: 'text.secondary', lineHeight: 1.45 }}>
-        {role.description}
-      </Typography>
-      {checked && (
-        <CheckCircleRoundedIcon
-          aria-hidden="true"
-          sx={{ position: 'absolute', top: 12, right: 12, fontSize: 20, color: 'primary.main' }}
-        />
-      )}
     </Box>
   );
 };
 
+/** Debounced invite/course-code preview. */
+export const useCodePreview = (rawCode) => {
+  const code = useDebouncedValue(rawCode.trim(), 350);
+  const [state, setState] = useState({ preview: null, loading: false, error: '' });
+  useEffect(() => {
+    if (code.length < 6) {
+      setState({ preview: null, loading: false, error: '' });
+      return undefined;
+    }
+    let cancelled = false;
+    setState({ preview: null, loading: true, error: '' });
+    previewInvite(code)
+      .then((preview) => !cancelled && setState({ preview, loading: false, error: '' }))
+      .catch((err) => {
+        if (cancelled) return;
+        const msg =
+          err.status === 404
+            ? 'We couldn’t find that code. Double-check it with whoever sent it to you.'
+            : err.message || 'Couldn’t check that code.';
+        setState({ preview: null, loading: false, error: msg });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [code]);
+  return { ...state, code };
+};
+
 const Register = () => {
-  const [searchParams] = useSearchParams();
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-    role: searchParams.get('role') === 'instructor' ? 'instructor' : 'student',
-  });
+  const [params] = useSearchParams();
+  const initialCode = params.get('code') || '';
+  const [mode, setMode] = useState(initialCode || params.get('mode') === 'join' ? 'join' : 'create');
+  const [form, setForm] = useState({ name: '', email: params.get('email') || '', password: '', workspaceName: '', code: initialCode });
   const [touched, setTouched] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const refs = { name: useRef(null), email: useRef(null), password: useRef(null), confirmPassword: useRef(null) };
+  const firstFieldRef = useRef(null);
 
   const { register } = useAuth();
   const navigate = useNavigate();
+  const codeState = useCodePreview(mode === 'join' ? form.code : '');
 
-  const errors = validate(formData);
-  const showError = (field) => (touched[field] || submitted) && errors[field];
+  const errors = useMemo(() => {
+    const e = {
+      name: form.name.trim().length < 2 ? 'Enter your full name.' : '',
+      email: !form.email.trim() ? 'Enter your email address.' : !EMAIL_PATTERN.test(form.email.trim()) ? 'That doesn’t look like a valid email address.' : '',
+      password: !passwordMeetsPolicy(form.password) ? 'Use at least 8 characters, including a letter and a number.' : '',
+    };
+    if (mode === 'create') e.workspaceName = form.workspaceName.trim().length < 2 ? 'Enter your institution or team name.' : '';
+    if (mode === 'join') e.code = !form.code.trim() ? 'Enter the invite or course code you were given.' : '';
+    return e;
+  }, [form, mode]);
 
-  const handleChange = (e) => {
+  const show = (field) => (touched[field] || submitted) && errors[field];
+
+  const onChange = (e) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    setForm((f) => ({ ...f, [name]: name === 'code' ? value.replace(/\s/g, '') : value }));
     if (error) setError('');
   };
+  const onBlur = (e) => setTouched((t) => ({ ...t, [e.target.name]: true }));
 
-  const handleBlur = (e) => setTouched((prev) => ({ ...prev, [e.target.name]: true }));
+  const switchMode = (_e, next) => {
+    setMode(next);
+    setSubmitted(false);
+    setError('');
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (loading) return;
     setSubmitted(true);
-
-    const firstInvalid = FIELD_ORDER.find((field) => errors[field]);
-    if (firstInvalid) {
-      refs[firstInvalid].current?.focus();
+    const firstError = Object.keys(errors).find((k) => errors[k]);
+    if (firstError) {
+      document.getElementById(`reg-${firstError}`)?.focus();
       return;
     }
-
-    const { name, email, password, role } = formData;
+    const base = { name: form.name.trim(), email: form.email.trim(), password: form.password };
+    const body =
+      mode === 'create'
+        ? { ...base, mode: 'create-workspace', workspaceName: form.workspaceName.trim() }
+        : { ...base, mode: 'join', code: form.code.trim() };
     try {
       setError('');
       setLoading(true);
-      const user = await register(name.trim(), email.trim(), password, role);
-      navigate(homePathFor(user), { replace: true });
+      await register(body);
+      navigate('/app', { replace: true });
     } catch (err) {
-      setError(err.message);
       setLoading(false);
+      if (err.code === 'PLAN_LIMIT') {
+        setError('This workspace has reached its plan’s seat limit. Ask your instructor or workspace admin to upgrade, then try again.');
+      } else if (err.status === 409) {
+        setError(
+          <>
+            An account with that email already exists.{' '}
+            <Link component={RouterLink} to="/login">
+              Sign in instead
+            </Link>
+            .
+          </>
+        );
+      } else {
+        setError(err.message || 'Registration failed. Please try again.');
+      }
     }
   };
 
-  // Confirm-password feedback is live once the user has started typing it.
-  const confirmError =
-    (touched.confirmPassword || submitted || (formData.confirmPassword && formData.confirmPassword.length >= formData.password.length)) &&
-    errors.confirmPassword;
-  const passwordsMatch = formData.confirmPassword && !errors.confirmPassword && !errors.password;
-
   return (
     <AuthLayout
-      documentTitle="Create account"
-      title="Create your account"
-      subtitle="Choose how you’ll use Navigate — you can start right away."
-      panel={PANELS[formData.role]}
+      documentTitle={mode === 'create' ? 'Create a workspace' : 'Join with a code'}
+      title={mode === 'create' ? 'Create your workspace' : 'Join with a code'}
+      subtitle={mode === 'create' ? 'Free to start. No credit card required.' : 'Use the invite link or course code you received.'}
+      panel={PANELS[mode]}
       footer={
         <>
           Already have an account?{' '}
@@ -197,109 +205,119 @@ const Register = () => {
         </>
       }
     >
+      <Tabs
+        value={mode}
+        onChange={switchMode}
+        variant="fullWidth"
+        aria-label="How do you want to get started?"
+        sx={{ mb: 2.5, borderBottom: 1, borderColor: 'divider' }}
+      >
+        <Tab value="create" label="Create a workspace" icon={<ApartmentRoundedIcon fontSize="small" />} iconPosition="start" />
+        <Tab value="join" label="Join with a code" icon={<KeyRoundedIcon fontSize="small" />} iconPosition="start" />
+      </Tabs>
+
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert severity="error" sx={{ mb: 2 }} role="alert">
           {error}
         </Alert>
       )}
 
-      <Box
-        component="form"
-        noValidate
-        onSubmit={handleSubmit}
-        aria-busy={loading}
-        // Room between one field's helper/error line and the next field's floating label.
-        sx={{ '& .MuiTextField-root + .MuiTextField-root': { mt: 1.5 } }}
-      >
-        <Box component="fieldset" sx={{ border: 0, p: 0, m: 0, mb: 2.5, minWidth: 0 }}>
-          <Typography component="legend" sx={{ fontSize: '0.875rem', fontWeight: 600, mb: 1.25, p: 0 }}>
-            I’m joining as
-          </Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 1.5 }}>
-            {ROLES.map((role) => (
-              <RoleOption key={role.value} role={role} checked={formData.role === role.value} onChange={handleChange} />
-            ))}
+      <Box component="form" noValidate onSubmit={handleSubmit} aria-busy={loading} sx={{ display: 'grid', gap: 1 }}>
+        {mode === 'join' && (
+          <Box sx={{ mb: 1 }}>
+            <TextField
+              id="reg-code"
+              name="code"
+              label="Invite or course code"
+              required
+              fullWidth
+              autoFocus={!initialCode}
+              value={form.code}
+              onChange={onChange}
+              onBlur={onBlur}
+              error={Boolean(show('code'))}
+              helperText={show('code') || 'e.g. a 6-letter course code like RWTCCG'}
+              inputProps={{ autoCapitalize: 'characters', spellCheck: false, autoComplete: 'off' }}
+              InputProps={{ startAdornment: <InputAdornment position="start"><KeyRoundedIcon fontSize="small" /></InputAdornment> }}
+            />
+            <CodePreview preview={codeState.preview} loading={codeState.loading} error={codeState.error} />
           </Box>
-        </Box>
-
+        )}
         <TextField
-          inputRef={refs.name}
-          required
-          fullWidth
-          id="name"
+          inputRef={firstFieldRef}
+          id="reg-name"
           name="name"
           label="Full name"
+          required
+          fullWidth
           autoComplete="name"
-          autoFocus
-          margin="dense"
-          value={formData.name}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          error={Boolean(showError('name'))}
-          helperText={showError('name') || ' '}
+          autoFocus={mode === 'create' || Boolean(initialCode)}
+          value={form.name}
+          onChange={onChange}
+          onBlur={onBlur}
+          error={Boolean(show('name'))}
+          helperText={show('name') || ' '}
         />
         <TextField
-          inputRef={refs.email}
-          required
-          fullWidth
-          id="email"
+          id="reg-email"
           name="email"
           type="email"
-          label="Email address"
+          label={mode === 'create' ? 'Work email' : 'Email'}
+          required
+          fullWidth
           autoComplete="email"
           inputProps={{ inputMode: 'email', autoCapitalize: 'none', spellCheck: false }}
-          margin="dense"
-          value={formData.email}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          error={Boolean(showError('email'))}
-          helperText={showError('email') || ' '}
+          value={form.email}
+          onChange={onChange}
+          onBlur={onBlur}
+          error={Boolean(show('email'))}
+          helperText={show('email') || ' '}
         />
-        <PasswordField
-          ref={refs.password}
-          required
-          fullWidth
-          id="password"
-          name="password"
-          label="Password"
-          autoComplete="new-password"
-          margin="dense"
-          value={formData.password}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          error={Boolean(showError('password'))}
-          helperText={showError('password') || `At least ${MIN_PASSWORD} characters.`}
-        />
-        <PasswordField
-          ref={refs.confirmPassword}
-          required
-          fullWidth
-          id="confirmPassword"
-          name="confirmPassword"
-          label="Confirm password"
-          autoComplete="new-password"
-          margin="dense"
-          value={formData.confirmPassword}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          error={Boolean(confirmError)}
-          helperText={confirmError || (passwordsMatch ? 'Passwords match.' : ' ')}
-          FormHelperTextProps={{ sx: passwordsMatch && !confirmError ? { color: 'success.dark' } : undefined }}
-        />
-
+        {mode === 'create' && (
+          <TextField
+            id="reg-workspaceName"
+            name="workspaceName"
+            label="Institution or team name"
+            required
+            fullWidth
+            autoComplete="organization"
+            value={form.workspaceName}
+            onChange={onChange}
+            onBlur={onBlur}
+            error={Boolean(show('workspaceName'))}
+            helperText={show('workspaceName') || 'Shown to everyone you invite. You can change it later.'}
+          />
+        )}
+        <Box>
+          <PasswordField
+            id="reg-password"
+            name="password"
+            label="Password"
+            required
+            fullWidth
+            autoComplete="new-password"
+            value={form.password}
+            onChange={onChange}
+            onBlur={onBlur}
+            error={Boolean(show('password'))}
+            helperText={show('password') || undefined}
+          />
+          <PasswordStrength password={form.password} />
+        </Box>
         <Button
           type="submit"
           fullWidth
           variant="contained"
           size="large"
           disabled={loading}
-          sx={{ mt: 2, '&.Mui-disabled': loading ? { bgcolor: 'primary.main', color: '#fff', opacity: 0.85 } : {} }}
+          sx={{ mt: 2 }}
           startIcon={loading ? <CircularProgress size={18} color="inherit" /> : null}
         >
-          {loading
-            ? 'Creating your account…'
-            : `Create ${formData.role === 'instructor' ? 'instructor' : 'student'} account`}
+          {loading ? 'Setting things up…' : mode === 'create' ? 'Create workspace' : 'Join and create account'}
         </Button>
+        <Typography variant="caption" sx={{ color: 'text.secondary', textAlign: 'center', mt: 1 }}>
+          By continuing you agree to use Navigate in line with your institution’s policies.
+        </Typography>
       </Box>
     </AuthLayout>
   );

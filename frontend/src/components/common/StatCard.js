@@ -24,11 +24,11 @@ const StatCard = ({ label, value, icon, tone = 'primary', hint, trend, loading =
       sx={{
         position: 'relative',
         width: '100%',
-        p: 2.5,
+        p: { xs: 2, sm: 2.5 },
         borderRadius: 4,
         display: 'flex',
         alignItems: 'flex-start',
-        gap: 2,
+        gap: { xs: 1.25, sm: 2 },
         textAlign: 'left',
         font: 'inherit',
         color: 'inherit',
@@ -44,7 +44,23 @@ const StatCard = ({ label, value, icon, tone = 'primary', hint, trend, loading =
       }}
     >
       <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 600, mb: 0.75 }} noWrap>
+        <Typography
+          variant="body2"
+          title={typeof label === 'string' ? label : undefined}
+          sx={{
+            color: 'text.secondary',
+            fontWeight: 600,
+            mb: 0.75,
+            fontSize: { xs: '0.78rem', sm: '0.875rem' },
+            lineHeight: 1.3,
+            // Wrap to two lines on narrow cards instead of truncating ("Studen…").
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+            overflowWrap: 'anywhere',
+          }}
+        >
           {label}
         </Typography>
         {loading ? (
@@ -52,7 +68,7 @@ const StatCard = ({ label, value, icon, tone = 'primary', hint, trend, loading =
         ) : (
           <Typography
             component="p"
-            sx={{ fontSize: '1.875rem', fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}
+            sx={{ fontSize: { xs: '1.5rem', sm: '1.875rem' }, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}
           >
             {value}
           </Typography>
@@ -96,8 +112,8 @@ const StatCard = ({ label, value, icon, tone = 'primary', hint, trend, loading =
         <Box
           aria-hidden="true"
           sx={{
-            width: 44,
-            height: 44,
+            width: { xs: 34, sm: 44 },
+            height: { xs: 34, sm: 44 },
             borderRadius: 3,
             display: 'grid',
             placeItems: 'center',
@@ -105,7 +121,7 @@ const StatCard = ({ label, value, icon, tone = 'primary', hint, trend, loading =
             color: tone === 'secondary' || tone === 'warning' ? palette.dark : palette.main,
             bgcolor: alpha(palette.main, tone === 'secondary' ? 0.18 : 0.1),
             boxShadow: `inset 0 0 0 1px ${alpha(palette.main, 0.16)}`,
-            '& svg': { fontSize: 22 },
+            '& svg': { fontSize: { xs: 18, sm: 22 } },
           }}
         >
           {icon}

@@ -24,7 +24,7 @@ const EmptyState = ({ icon, title, description, action, tone = 'neutral', compac
         borderRadius: 4,
         border: '1px dashed',
         borderColor: isError ? alpha(accent, 0.4) : 'grey.300',
-        bgcolor: isError ? alpha(accent, 0.03) : 'rgba(255,255,255,0.6)',
+        bgcolor: isError ? alpha(accent, 0.03) : alpha(theme.palette.background.paper, 0.6),
         ...sx,
       }}
     >

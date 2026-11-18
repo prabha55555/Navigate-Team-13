@@ -1,72 +1,125 @@
-const jwt = require('jsonwebtoken');
+/**
+ * Authentication & authorization middleware.
+ *
+ *   const auth = require('../middlewares/auth');
+ *   router.get('/x', auth.requireAuth, auth.requireRole(...auth.STAFF_ROLES), handler);
+ *
+ * Backward compatible with the legacy routes: the module itself is a callable
+ * middleware (=== requireAuth) with requireRole / optionalAuth attached.
+ *
+ * req.user = { id, role, organization, name, email } (ids as strings). The
+ * role and workspace come from the database (cached ~30 s), not the token, so
+ * role changes and deactivation take effect quickly.
+ */
+const mongoose = require('mongoose');
+const User = require('../models/User');
+const { verifyAccessToken } = require('../services/tokens');
+const { attachLegacyUser } = require('../services/workspace');
+const { unauthenticated, accountDeactivated, forbidden, serviceUnavailable, asyncHandler } = require('../utils/errors');
 
-// The x-test-mode header used to let ANY caller act as an instructor or student
-// without a token. It is now only honoured when explicitly enabled for local
-// test scripts (ALLOW_TEST_AUTH_BYPASS=true) and never in production.
-const testBypassEnabled = () =>
-  process.env.ALLOW_TEST_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
+const STAFF_ROLES = ['owner', 'admin', 'instructor'];
+const ADMIN_ROLES = ['owner', 'admin'];
 
-function authMiddleware(req, res, next) {
-  // For testing purposes - bypass authentication with special header
-  if (req.header('x-test-mode') === 'true' && testBypassEnabled()) {
-    // Check if this is an instructor route by checking the URL or method
-    const isInstructorRoute = req.url.includes('/save') || req.url.includes('/instructor') ||
-                              req.method === 'POST' && req.url.includes('/assessment');
+const CACHE_TTL_MS = 30 * 1000;
+const CACHE_MAX = 5000;
+const userCache = new Map(); // id -> { user, expires }
 
-    req.user = {
-      id: isInstructorRoute ? 'test-instructor-id' : 'test-student-id',
-      role: isInstructorRoute ? 'instructor' : 'student',
-      name: isInstructorRoute ? 'Test Instructor' : 'Test Student'
-    };
-    return next();
-  }
-
-  // Get token from header (x-auth-token is the app convention; a standard
-  // "Authorization: Bearer <token>" header is accepted as well)
-  let token = req.header('x-auth-token');
-  if (!token) {
-    const authHeader = req.header('authorization') || '';
-    if (/^Bearer\s+/i.test(authHeader)) {
-      token = authHeader.replace(/^Bearer\s+/i, '').trim();
-    }
-  }
-
-  // Check if no token
-  if (!token) {
-    return res.status(401).json({ message: 'No token, authorization denied' });
-  }
-
-  // Verify token
-  let decoded;
-  try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret');
-  } catch (err) {
-    return res.status(401).json({ message: 'Token is not valid' });
-  }
-
-  // A validly signed token without the expected payload used to set
-  // req.user = undefined and crash later handlers with a 500.
-  if (!decoded || !decoded.user || !decoded.user.id) {
-    return res.status(401).json({ message: 'Token is not valid' });
-  }
-
-  req.user = decoded.user;
-  next();
+/** Drop a user from the auth cache (call after role change, deactivation, password change). */
+function invalidateUserCache(userId) {
+  if (userId) userCache.delete(String(userId));
 }
 
-/**
- * Role guard to use after authMiddleware, e.g. router.post('/x', auth, auth.requireRole('instructor'), handler)
- * Admins are always allowed.
- */
-authMiddleware.requireRole = (...roles) => (req, res, next) => {
-  const role = req.user && req.user.role;
-  if (role && (role === 'admin' || roles.includes(role))) {
-    return next();
-  }
-  return res.status(403).json({
-    success: false,
-    message: `This action requires the ${roles.join(' or ')} role`
-  });
-};
+function readToken(req) {
+  const header = req.header('x-auth-token');
+  if (header) return header.trim();
+  const authz = req.header('authorization') || '';
+  return /^Bearer\s+/i.test(authz) ? authz.replace(/^Bearer\s+/i, '').trim() : '';
+}
 
-module.exports = authMiddleware;
+async function loadUser(id) {
+  const cached = userCache.get(id);
+  if (cached && cached.expires > Date.now()) return cached.user;
+
+  let user = await User.findById(id)
+    .select('name email role organization deactivated passwordChangedAt')
+    .lean();
+  if (user && !user.organization) {
+    // Legacy account with a still-valid token: migrate it now.
+    const doc = await User.findById(id);
+    await attachLegacyUser(doc);
+    user = { ...user, organization: doc.organization, role: doc.role };
+  }
+  if (user) {
+    if (userCache.size >= CACHE_MAX) userCache.clear();
+    userCache.set(id, { user, expires: Date.now() + CACHE_TTL_MS });
+  }
+  return user;
+}
+
+/** Rejects with 401 UNAUTHENTICATED unless a valid access token for an active user is sent. */
+const requireAuth = asyncHandler(async (req, res, next) => {
+  const token = readToken(req);
+  if (!token) throw unauthenticated('Authentication required');
+
+  let decoded;
+  try {
+    decoded = verifyAccessToken(token);
+  } catch (err) {
+    throw unauthenticated(err.name === 'TokenExpiredError' ? 'Session expired' : 'Invalid token');
+  }
+  const id = decoded && decoded.user && decoded.user.id;
+  if (!id || !mongoose.isValidObjectId(id)) throw unauthenticated('Invalid token');
+  if (mongoose.connection.readyState !== 1) throw serviceUnavailable('Database is unavailable. Please try again shortly.');
+
+  const user = await loadUser(String(id));
+  if (!user) throw unauthenticated('Account not found');
+  if (user.deactivated) throw accountDeactivated();
+  // Tokens issued before the last password change are no longer valid.
+  if (user.passwordChangedAt && decoded.iat * 1000 < new Date(user.passwordChangedAt).getTime()) {
+    throw unauthenticated('Session expired');
+  }
+
+  req.user = {
+    id: String(user._id),
+    role: user.role,
+    organization: String(user.organization),
+    name: user.name,
+    email: user.email
+  };
+  next();
+});
+
+/** Authenticates when a token is sent (invalid tokens still get 401); otherwise continues anonymously. */
+const optionalAuth = (req, res, next) => (readToken(req) ? requireAuth(req, res, next) : next());
+
+/**
+ * 403 FORBIDDEN unless req.user.role is allowed. Roles follow the hierarchy
+ * owner > admin > instructor: allowing 'instructor' also allows admin/owner,
+ * and allowing 'admin' also allows owner. 'student' is matched exactly.
+ */
+function requireRole(...roles) {
+  const allowed = new Set(roles.flat());
+  if (allowed.has('instructor')) ['admin', 'owner'].forEach((r) => allowed.add(r));
+  if (allowed.has('admin')) allowed.add('owner');
+  return (req, res, next) => {
+    if (!req.user) return next(unauthenticated());
+    if (!allowed.has(req.user.role)) return next(forbidden(`This action requires the ${roles.flat().join(' or ')} role`));
+    return next();
+  };
+}
+
+/** Back-compat: the module is callable as a middleware. */
+function auth(req, res, next) {
+  return requireAuth(req, res, next);
+}
+
+Object.assign(auth, {
+  requireAuth,
+  requireRole,
+  optionalAuth,
+  invalidateUserCache,
+  STAFF_ROLES,
+  ADMIN_ROLES
+});
+
+module.exports = auth;

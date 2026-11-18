@@ -8,6 +8,7 @@ dotenv.config();
 // Shared model selection: skips retired models (the configured gemini-2.0-flash
 // now 404s) and falls back to currently available ones.
 const geminiModels = require('../../ai_services/models/geminiModels');
+const logger = require('../utils/logger');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = geminiModels.candidateModels(process.env.GEMINI_MODEL)[0];
@@ -45,12 +46,12 @@ if (GEMINI_API_KEY && GEMINI_API_KEY !== 'your-api-key-here') {
         throw lastError || new Error('No Gemini model available');
       }
     };
-    console.log('Gemini AI initialized successfully with model:', GEMINI_MODEL);
+    logger.info('ai.gemini_ready', { model: GEMINI_MODEL });
   } catch (error) {
     console.error('Failed to initialize Gemini AI:', error);
   }
 } else {
-  console.log('No valid Gemini API key found. Using simulation mode.');
+  logger.info('ai.gemini_not_configured', { msg: 'No Gemini API key; AI features use template fallbacks' });
 }
 
 /**
@@ -927,9 +928,34 @@ const generateLearningOutcomesFromDescription = async (courseTitle, courseDescri
   }
 };
 
+/**
+ * Free-form text generation with the shared Gemini model (same model fallback
+ * chain as above), bounded by `timeoutMs`. Throws when Gemini is not
+ * configured or fails, so callers can switch to their template fallback.
+ */
+const generateText = async (prompt, { timeoutMs = GEMINI_TIMEOUT_MS } = {}) => {
+  if (!model) throw new Error('Gemini is not configured');
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Gemini request timed out')), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([model.generateContent(prompt), timeout]);
+    return result.response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/** Whether a Gemini model is configured (an API key is present). */
+const isAiConfigured = () => Boolean(model);
+
 // Export the functions
 module.exports = {
   generateCurriculumMap,
   generateLearningOutcomes,
-  generateLearningOutcomesFromDescription
+  generateLearningOutcomesFromDescription,
+  generateText,
+  isAiConfigured,
+  parseModelJson
 };

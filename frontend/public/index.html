@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0E1630" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
     <meta
       name="description"
-      content="Navigate is an AI-powered assessment and adaptive learning platform: generate proctored assessments from a syllabus, grade them instantly and give every student a personal route to mastery."
+      content="Navigate is an AI-powered assessment and adaptive learning platform for institutions: build assessments with AI, run them with proctoring, analyse results and give every learner a personal learning path."
     />
     <meta property="og:title" content="Navigate — AI assessment &amp; adaptive learning" />
     <meta
@@ -28,6 +28,10 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500..700;1,9..144,500..600&family=Plus+Jakarta+Sans:wght@400..700&display=swap"
     />
+
+    <!-- Apply the saved colour mode before first paint (no light/dark flash). -->
+
+    <script>(function(){try{var m=localStorage.getItem("nv-theme");var d=m==="dark"||((!m||m==="system")&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.setAttribute("data-theme",d?"dark":"light");document.documentElement.style.backgroundColor=d?"#0A1022":"#F6F5F1";}catch(e){}})();</script>
 
     <title>Navigate — AI assessment &amp; adaptive learning</title>
   </head>

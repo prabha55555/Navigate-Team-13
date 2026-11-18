@@ -1,0 +1,24 @@
+# Used by the backend image (build context = repository root).
+**/node_modules
+**/build
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+.git
+.github
+.vscode
+.builds
+docs
+*.md
+**/*.log
+docker-compose.yml
+**/Dockerfile
+**/.dockerignore
+
+# Not needed in the backend image
+frontend
+backend/tests
+backend/uploads
+backend/start-with-assessments.cmd
+ai_services/cache

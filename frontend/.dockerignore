@@ -1,0 +1,8 @@
+# Used by the frontend image (build context = ./frontend).
+node_modules
+build
+.env
+.env.*
+*.log
+Dockerfile
+.dockerignore

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const transformersModel = require('../models/transformersModel');
+const { cleanTopicList, extractTopicsFromText, looksLikeJunk } = require('./topicExtractor');
 require('dotenv').config();
 
 const DEFAULT_TOPICS = ['Course Fundamentals', 'Key Concepts', 'Practical Applications'];
@@ -33,6 +34,12 @@ function extractCorrectKey(block) {
     if (token === 'TRUE' || token === 'T') return 'True';
     if (token === 'FALSE' || token === 'F') return 'False';
     return token;
+}
+
+/** The "Explanation: ..." line of a generated question block, or '' when the model gave none. */
+function extractExplanation(block) {
+    const m = String(block || '').replace(/[*_`]/g, '').match(/Explanation\s*[:\-–]\s*([^\n]+)/i);
+    return m ? m[1].trim() : '';
 }
 
 /** Map a parsed key onto a true/false answer ("A"/"B" mean the True/False options). */
@@ -187,7 +194,7 @@ Generate exactly ${questionCount} questions, one after another.`;
                         topic: topicMatch ? topicMatch[1].trim() : topicsToUse[i % topicsToUse.length],
                         points: pointsMatch ? parseInt(pointsMatch[1], 10) || 1 : 1,
                         difficulty: difficulty,
-                        explanation: "Explanation will be provided after submission."
+                        explanation: extractExplanation(block)
                     });
                 }
             }
@@ -202,7 +209,8 @@ Generate exactly ${questionCount} questions, one after another.`;
                 timeLimit: timeLimit,
                 questions: finalQuestions,
                 generatedAt: new Date().toISOString(),
-                generatedBy: 'gemini',
+                // Callers need to know when nothing usable came back from the model.
+                generatedBy: questions.length > 0 ? 'gemini' : 'gemini-fallback',
                 courseInfo: {
                     title: basicInfo.courseTitle,
                     code: basicInfo.courseCode,
@@ -426,6 +434,13 @@ If certain sections aren't present in the syllabus, leave them as empty arrays o
         // The pattern selector reads assessmentPatterns.patterns; it was never returned
         analysisResult.assessmentPatterns = normalizeAssessmentPatterns(analysisResult.assessmentPatterns);
 
+        // Fallback responses can echo the prompt; never pass JSON fragments or blobs on as topics.
+        analysisResult.learningOutcomes = analysisResult.learningOutcomes || {};
+        const keyTopics = analysisResult.learningOutcomes.keyTopics;
+        analysisResult.learningOutcomes.keyTopics = looksLikeJunk(keyTopics)
+            ? extractTopicsFromText(syllabusContent)
+            : cleanTopicList(keyTopics);
+
         // Add metadata
         analysisResult.metadata = {
             analyzedAt: new Date().toISOString(),
@@ -456,20 +471,9 @@ function generateBasicSyllabusStructure(syllabusContent) {
     const instructorMatch = syllabusContent.match(/instructor:?\s*([^\n]+)/i);
     const termMatch = syllabusContent.match(/term:?\s*([^\n]+)/i);
     
-    // Extract topic keywords by looking for bullet points or numbered lists
-    const topics = [];
-    const topicMatches = syllabusContent.match(/[-•*]\s*([^\n]+)/g) || 
-                        syllabusContent.match(/\d+\.\s*([^\n]+)/g) || [];
-    
-    // Process up to 5 topics
-    for (let i = 0; i < Math.min(topicMatches.length, 5); i++) {
-        // Clean up the topic text
-        const topic = topicMatches[i].replace(/[-•*\d.]\s*/, '').trim();
-        if (topic && topic.length > 3) {
-            topics.push(topic);
-        }
-    }
-    
+    // Extract topics from numbered / bulleted lists and "Topics:" sections
+    const topics = extractTopicsFromText(syllabusContent).slice(0, 10);
+
     // If we couldn't extract topics, provide some defaults
     if (topics.length === 0) {
         topics.push('Course Fundamentals');
@@ -697,10 +701,10 @@ Topics (JSON array of strings):
                     topics = [];
                 }
                 
-                // Clean up topics - remove any that are too short or not strings
-                topics = topics
-                    .filter(topic => typeof topic === 'string' && topic.trim().length > 2)
-                    .map(topic => topic.trim());
+                // Split multi-line items, strip numbering, drop junk and duplicates
+                topics = looksLikeJunk(topics) && !cleanTopicList(topics).length
+                    ? extractTopicsUsingPatterns(syllabusContent)
+                    : cleanTopicList(topics);
                 
             } catch (parseError) {
                 console.error('Error parsing topics JSON from model response:', parseError);
@@ -712,10 +716,9 @@ Topics (JSON array of strings):
             topics = extractTopicsUsingPatterns(syllabusContent);
         }
         
-        // If we couldn't extract any topics, return an empty array, not defaults
+        // Nothing usable from the model: fall back to the syllabus text itself
         if (!topics || topics.length === 0) {
-            console.log('No topics found, returning empty array');
-            topics = [];
+            topics = extractTopicsUsingPatterns(syllabusContent);
         }
         
         // Limit to a reasonable number of topics
@@ -744,57 +747,13 @@ Topics (JSON array of strings):
 }
 
 /**
- * Extract topics using regex patterns when AI extraction fails
+ * Extract topics using text patterns when AI extraction fails
  * @private
  * @param {string} syllabusContent - Raw text content of the syllabus
  * @returns {Array} - Array of topic strings
  */
 function extractTopicsUsingPatterns(syllabusContent) {
-    // Look for common topic patterns in the syllabus
-    const topics = [];
-    
-    // Match sections that might contain topics
-    const contentSections = syllabusContent.match(/(?:topics|content|subject|curriculum|modules|units|lessons)[ :].+?(?:\n\n|\n\r\n|$)/gi) || [];
-    
-    // Process each potential section to extract topics
-    for (const section of contentSections) {
-        // Look for bulleted or numbered list items
-        const listItems = section.match(/[-•*][ \t](.+?)(?:\n|$)/g) || 
-                          section.match(/\d+\.[ \t](.+?)(?:\n|$)/g) || 
-                          section.match(/[A-Z]\.[ \t](.+?)(?:\n|$)/g);
-        
-        if (listItems && listItems.length > 0) {
-            for (const item of listItems) {
-                // Clean up the item
-                const cleaned = item.replace(/^[-•*\d.A-Z][ \t]+/, '').trim();
-                if (cleaned.length > 3 && !topics.includes(cleaned)) {
-                    topics.push(cleaned);
-                }
-            }
-        }
-    }
-    
-    // Look for potential topics in headings or bold text
-    const headings = syllabusContent.match(/#{1,6}[ \t](.+?)(?:\n|$)/g) || 
-                     syllabusContent.match(/\*\*(.+?)\*\*/g) || 
-                     syllabusContent.match(/Chapter \d+:[ \t](.+?)(?:\n|$)/gi);
-    
-    if (headings && headings.length > 0) {
-        for (const heading of headings) {
-            // Clean up the heading
-            const cleaned = heading.replace(/^#{1,6}[ \t]+/, '')
-                                 .replace(/^\*\*|\*\*$/g, '')
-                                 .replace(/^Chapter \d+:[ \t]+/i, '')
-                                 .trim();
-            
-            if (cleaned.length > 3 && !topics.includes(cleaned) && 
-                !cleaned.match(/course|syllabus|overview|assessment|grading|schedule|policy|objective/i)) {
-                topics.push(cleaned);
-            }
-        }
-    }
-    
-    return topics;
+    return extractTopicsFromText(syllabusContent);
 }
 
 /**
@@ -1000,7 +959,8 @@ Question 2: ...
                     topic: topic,
                     difficulty: difficulty,
                     points: points,
-                    explanation: `This question tests understanding of ${topic}.`
+                    // Only the model's own explanation; no generic template text on AI questions.
+                    explanation: extractExplanation(questionBlock)
                 });
             }
         }

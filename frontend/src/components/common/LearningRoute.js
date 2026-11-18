@@ -7,9 +7,9 @@ const DRAW_START = 0.35; // s — keep in sync with .nv-route__draw in index.css
 const DEFAULT_DRAW_DURATION = 2.6; // s
 
 export const DEFAULT_STOPS = [
-  { label: 'Syllabus', caption: 'PDF & DOCX upload', x: 64, y: 404, place: 'top' },
-  { label: 'AI Assessment', caption: '4 question types', x: 236, y: 336, place: 'left' },
-  { label: 'Insights', caption: 'Auto-graded, pass/fail', x: 168, y: 222, place: 'left' },
+  { label: 'Syllabus', caption: 'PDF, DOCX or TXT', x: 64, y: 404, place: 'bottom-right' },
+  { label: 'AI Assessment', caption: '5 question types', x: 236, y: 336, place: 'right' },
+  { label: 'Insights', caption: 'Analytics & item analysis', x: 168, y: 222, place: 'left' },
   { label: 'Adaptive Path', caption: 'You are here', x: 364, y: 172, place: 'bottom-right', here: true },
   { label: 'Mastery', caption: 'Destination', x: 530, y: 62, place: 'top', destination: true },
 ];

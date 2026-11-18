@@ -24,9 +24,10 @@ const analyzedSubmissions = new Map();
  * @param {String} params.assessmentId - ID of the assessment
  * @param {Array} params.answers - Array of student answers
  * @param {Object} params.assessmentDetails - Assessment details and questions
+ * @param {Array} [params.previousSubmissions] - other students' submissions to compare against
  * @returns {Object} Plagiarism detection results
  */
-exports.checkSubmission = async ({ submissionId, studentId, assessmentId, answers, assessmentDetails }) => {
+exports.checkSubmission = async ({ submissionId, studentId, assessmentId, answers, assessmentDetails, previousSubmissions: providedPrevious }) => {
   try {
     console.log(`Running comprehensive plagiarism check for submission ${submissionId}`);
     
@@ -41,7 +42,11 @@ exports.checkSubmission = async ({ submissionId, studentId, assessmentId, answer
     };
     
     // Get previous submissions for this assessment (excluding current student's)
-    const previousSubmissions = await getPreviousSubmissions(assessmentId, studentId);
+    // Callers with a database pass the other students' answers in
+    // ({ id, studentId, answers: [{ questionId, answer }] }); otherwise use the in-memory history.
+    const previousSubmissions = Array.isArray(providedPrevious)
+      ? providedPrevious
+      : await getPreviousSubmissions(assessmentId, studentId);
     
     // Run the AI service detection and the external API checks concurrently
     const [aiServiceResults, externalApiResults] = await Promise.all([
@@ -548,7 +553,7 @@ exports.generateInstructorReport = async (plagiarismResults, studentData) => {
     
     return {
       summary: flaggedSubmissions.length > 0 
-        ? `Found ${flaggedSubmissions.length} submissions with potential academic integrity concerns.`
+        ? `Found ${flaggedSubmissions.length} ${flaggedSubmissions.length === 1 ? 'submission' : 'submissions'} with potential academic integrity concerns.`
         : "No significant academic integrity concerns detected in this assessment.",
       flaggedSubmissions,
       recommendations,

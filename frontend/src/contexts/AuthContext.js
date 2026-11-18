@@ -1,129 +1,104 @@
-import axios from 'axios';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import * as authApi from '../api/auth';
+import {
+  clearTokens,
+  getRefreshToken,
+  getToken,
+  getTokenExpiry,
+  onSessionExpired,
+  onTokenChange,
+  refreshAccessToken,
+  setTokens,
+} from '../api/client';
 
 const AuthContext = createContext(null);
 
 export const useAuth = () => useContext(AuthContext);
 
-const TOKEN_KEY = 'token';
-const REFRESH_KEY = 'refreshToken';
-const ROLE_KEY = 'userRole';
+/** Convenience: the current workspace (plan, limits, usage, branding, settings) or null. */
+export const useWorkspace = () => useContext(AuthContext)?.workspace || null;
+
 const USER_KEY = 'user';
+const WORKSPACE_KEY = 'workspace';
+const ROLE_KEY = 'userRole';
+
+export const DEACTIVATED_MESSAGE = 'This account has been deactivated. Contact your workspace admin.';
 
 // Refresh the access token this long before it expires.
 const REFRESH_LEAD_MS = 60 * 1000;
-const AUTH_ENDPOINTS = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh-token', '/api/auth/logout'];
 
-const readStoredUser = () => {
+const readJson = (key) => {
   try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw && localStorage.getItem(TOKEN_KEY) ? JSON.parse(raw) : null;
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 };
-
-// Milliseconds since epoch at which a JWT expires, or null if unreadable.
-const getTokenExpiry = (jwt) => {
+const writeJson = (key, value) => {
   try {
-    const payload = JSON.parse(atob(jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    return null;
+    /* ignore */
   }
 };
 
-const storeSession = (token, refreshToken, user) => {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken);
-  if (user) {
-    localStorage.setItem(USER_KEY, JSON.stringify(user));
-    localStorage.setItem(ROLE_KEY, user.role);
+const cacheUser = (user) => {
+  writeJson(USER_KEY, user);
+  try {
+    if (user) localStorage.setItem(ROLE_KEY, user.role);
+    else localStorage.removeItem(ROLE_KEY);
+  } catch {
+    /* ignore */
   }
 };
-
-const clearSession = () => {
-  [TOKEN_KEY, REFRESH_KEY, ROLE_KEY, USER_KEY].forEach((key) => localStorage.removeItem(key));
-};
-
-// Attach the current token to every axios request. Reading localStorage at request
-// time (instead of a default header set in an effect) avoids a race where child
-// components fire requests before the provider's effects have run.
-axios.interceptors.request.use((config) => {
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (token && !config.headers['x-auth-token']) {
-    config.headers['x-auth-token'] = token;
-  }
-  return config;
-});
 
 export const AuthProvider = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState(readStoredUser);
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
-  // With a cached user we can render immediately and verify in the background.
-  const [loading, setLoading] = useState(() => Boolean(localStorage.getItem(TOKEN_KEY)) && !readStoredUser());
-  const [error, setError] = useState('');
-  const refreshPromiseRef = useRef(null);
+  const [currentUser, setCurrentUser] = useState(() => (getToken() ? readJson(USER_KEY) : null));
+  const [workspace, setWorkspaceState] = useState(() => (getToken() ? readJson(WORKSPACE_KEY) : null));
+  const [token, setToken] = useState(getToken);
+  // With a cached user we render immediately and verify in the background.
+  const [loading, setLoading] = useState(() => Boolean(getToken()) && !readJson(USER_KEY));
+  // Shown once on the login page (e.g. "Your session expired").
+  const [sessionNotice, setSessionNotice] = useState('');
+  // True once the server has confirmed the cached user (role may have changed since it was cached).
+  // Role-gated screens wait for this before redirecting.
+  const [sessionVerified, setSessionVerified] = useState(() => !getToken());
 
-  const endSession = useCallback((message) => {
-    clearSession();
-    setToken(null);
-    setCurrentUser(null);
-    if (message) setError(message);
+  const setUser = useCallback((user) => {
+    cacheUser(user);
+    setCurrentUser(user);
   }, []);
 
-  // Single-flight refresh: concurrent 401s share one refresh request.
-  const refreshAccessToken = useCallback(() => {
-    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+  const setWorkspace = useCallback((next) => {
+    setWorkspaceState((prev) => {
+      const value = typeof next === 'function' ? next(prev) : next;
+      writeJson(WORKSPACE_KEY, value);
+      return value;
+    });
+  }, []);
 
-    const storedRefresh = localStorage.getItem(REFRESH_KEY);
-    if (!storedRefresh) return Promise.resolve(false);
+  const endSession = useCallback((notice) => {
+    clearTokens();
+    cacheUser(null);
+    writeJson(WORKSPACE_KEY, null);
+    setCurrentUser(null);
+    setWorkspaceState(null);
+    if (notice) setSessionNotice(notice);
+  }, []);
 
-    refreshPromiseRef.current = axios
-      .post('/api/auth/refresh-token', { refreshToken: storedRefresh })
-      .then((response) => {
-        storeSession(response.data.token);
-        setToken(response.data.token);
-        return true;
-      })
-      .catch((err) => {
-        // Only a rejected refresh token ends the session; a network blip should not.
-        if (err.response && (err.response.status === 401 || err.response.status === 403)) {
-          endSession('Your session has expired. Please log in again.');
-        }
-        return false;
-      })
-      .finally(() => {
-        refreshPromiseRef.current = null;
-      });
+  // Keep React state in sync with the token store (refreshes happen inside the API client).
+  useEffect(() => onTokenChange(setToken), []);
+  useEffect(
+    () =>
+      onSessionExpired((reason) =>
+        endSession(reason === 'deactivated' ? DEACTIVATED_MESSAGE : 'Your session has expired. Please sign in again.')
+      ),
+    [endSession]
+  );
 
-    return refreshPromiseRef.current;
-  }, [endSession]);
-
-  // Retry a request once after refreshing when the server says the token expired.
-  useEffect(() => {
-    const interceptor = axios.interceptors.response.use(
-      (response) => response,
-      async (err) => {
-        const original = err.config || {};
-        const status = err.response?.status;
-        const isAuthCall = AUTH_ENDPOINTS.some((path) => (original.url || '').includes(path));
-
-        if (status === 401 && !original._retry && !isAuthCall && localStorage.getItem(REFRESH_KEY)) {
-          original._retry = true;
-          if (await refreshAccessToken()) {
-            original.headers = { ...original.headers, 'x-auth-token': localStorage.getItem(TOKEN_KEY) };
-            return axios(original);
-          }
-        }
-        return Promise.reject(err);
-      }
-    );
-    return () => axios.interceptors.response.eject(interceptor);
-  }, [refreshAccessToken]);
-
-  // Proactively refresh shortly before expiry so fetch() callers that read the
-  // token from localStorage always get a valid one.
+  // Proactively refresh shortly before expiry so long-running pages never hit a 401.
   useEffect(() => {
     if (!token) return undefined;
     const expiry = getTokenExpiry(token);
@@ -143,84 +118,120 @@ export const AuthProvider = ({ children }) => {
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [token, refreshAccessToken]);
+  }, [token]);
+
+  // Other tabs signing out (or in) should be reflected here.
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key === 'token' && !event.newValue && currentUser) endSession();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [currentUser, endSession]);
+
+  const refreshMe = useCallback(async () => {
+    const data = await authApi.getMe();
+    if (data?.user) setUser(data.user);
+    if (data?.workspace) setWorkspace(data.workspace);
+    return data;
+  }, [setUser, setWorkspace]);
 
   // Verify the stored session once on startup.
   useEffect(() => {
-    if (!localStorage.getItem(TOKEN_KEY)) {
+    if (!getToken()) {
       setLoading(false);
-      return;
+      setSessionVerified(true);
+      return undefined;
     }
     let cancelled = false;
-    axios
-      .get('/api/auth/me')
-      .then((res) => {
-        if (cancelled || !res.data?.user) return;
-        storeSession(null, null, res.data.user);
-        setCurrentUser(res.data.user);
+    authApi
+      .getMe()
+      .then((data) => {
+        if (cancelled || !data?.user) return;
+        setUser(data.user);
+        if (data.workspace) setWorkspace(data.workspace);
       })
       .catch((err) => {
         if (cancelled) return;
-        const status = err.response?.status;
         // 401 that survived the refresh retry, or a deleted user: the session is gone.
-        if (status === 401 || status === 403 || status === 404) {
-          endSession();
-        }
-        // Network/5xx errors keep the cached user so a backend hiccup doesn't log people out.
+        if ([401, 403, 404].includes(err.status)) endSession();
+        // Network/5xx errors keep the cached user so a backend hiccup doesn't sign people out.
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setSessionVerified(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [endSession]);
+  }, [endSession, setUser, setWorkspace]);
 
-  const startSession = useCallback((data) => {
-    const { token: authToken, refreshToken: authRefreshToken, user } = data;
-    storeSession(authToken, authRefreshToken, user);
-    setToken(authToken);
-    setCurrentUser(user);
-    setError('');
-    return user;
-  }, []);
+  const startSession = useCallback(
+    (data) => {
+      setTokens({ token: data.token, refreshToken: data.refreshToken });
+      setUser(data.user);
+      setWorkspace(data.workspace || null);
+      setSessionNotice('');
+      setSessionVerified(true);
+      return data.user;
+    },
+    [setUser, setWorkspace]
+  );
 
-  const register = useCallback(async (name, email, password, role = 'student') => {
-    try {
-      setError('');
-      const response = await axios.post('/api/auth/register', { name, email, password, role });
-      return startSession(response.data);
-    } catch (err) {
-      const message = err.response?.data?.message || 'Registration failed. Is the server running?';
-      setError(message);
-      throw new Error(message);
-    }
-  }, [startSession]);
+  /** login(email, password) → user. Rejects with ApiError. */
+  const login = useCallback(
+    async (email, password) => startSession(await authApi.login(email, password)),
+    [startSession]
+  );
 
-  const login = useCallback(async (email, password) => {
-    try {
-      setError('');
-      const response = await axios.post('/api/auth/login', { email, password });
-      return startSession(response.data);
-    } catch (err) {
-      const message = err.response?.data?.message || 'Login failed. Is the server running?';
-      setError(message);
-      throw new Error(message);
-    }
-  }, [startSession]);
+  /** register({ name, email, password, mode, workspaceName | code }) → user. Rejects with ApiError. */
+  const register = useCallback(async (body) => startSession(await authApi.register(body)), [startSession]);
 
   const logout = useCallback(async () => {
-    const storedRefresh = localStorage.getItem(REFRESH_KEY);
+    const storedRefresh = getRefreshToken();
     endSession();
-    if (storedRefresh) {
-      // Fire and forget: the local session is already cleared.
-      axios.post('/api/auth/logout', { refreshToken: storedRefresh }).catch(() => {});
-    }
+    if (storedRefresh) authApi.logout(storedRefresh).catch(() => {});
   }, [endSession]);
 
+  /** PATCH /auth/me { name?, preferences? } → user */
+  const updateProfile = useCallback(
+    async (body) => {
+      const { user } = await authApi.updateMe(body);
+      if (user) setUser(user);
+      return user;
+    },
+    [setUser]
+  );
+
+  /** Change password and continue with the new tokens (older sessions are signed out server-side). */
+  const changePassword = useCallback(async (currentPassword, newPassword) => {
+    const data = await authApi.changePassword(currentPassword, newPassword);
+    setTokens({ token: data.token, refreshToken: data.refreshToken });
+    return data;
+  }, []);
+
+  const clearSessionNotice = useCallback(() => setSessionNotice(''), []);
+
   const value = useMemo(
-    () => ({ currentUser, loading, error, register, login, logout, refreshAccessToken }),
-    [currentUser, loading, error, register, login, logout, refreshAccessToken]
+    () => ({
+      currentUser,
+      workspace,
+      loading,
+      sessionVerified,
+      sessionNotice,
+      login,
+      register,
+      logout,
+      refreshMe,
+      updateProfile,
+      changePassword,
+      setWorkspace,
+      clearSessionNotice,
+      refreshAccessToken,
+    }),
+    [currentUser, workspace, loading, sessionVerified, sessionNotice, login, register, logout, refreshMe, updateProfile, changePassword, setWorkspace, clearSessionNotice]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

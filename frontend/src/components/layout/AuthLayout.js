@@ -10,7 +10,7 @@ import LearningRoute from '../common/LearningRoute';
  * Split auth layout: form card on the left, ink "route" panel on the right (md+).
  * panel: { eyebrow, title, bullets: string[] }
  */
-const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children }) => {
+const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children, wide = false }) => {
   useEffect(() => {
     if (documentTitle) document.title = `${documentTitle} · Navigate`;
   }, [documentTitle]);
@@ -31,7 +31,7 @@ const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children })
           flexDirection: 'column',
           minWidth: 0,
           px: { xs: 2, sm: 5, lg: 8 },
-          py: { xs: 2.5, sm: 4 },
+          py: { xs: 2.5, sm: 3 },
         }}
       >
         <Box component="header" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
@@ -48,14 +48,14 @@ const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children })
           </Button>
         </Box>
 
-        <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', py: { xs: 3, sm: 5 } }}>
-          <Box className="nv-rise" sx={{ width: '100%', maxWidth: 460 }}>
+        <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', py: { xs: 3, sm: 3 } }}>
+          <Box className="nv-rise" sx={{ width: '100%', maxWidth: wide ? 520 : 460 }}>
             <Paper
               variant="outlined"
               sx={{
-                p: { xs: 2.5, sm: 4.5 },
+                p: { xs: 2.5, sm: 4 },
                 borderRadius: '24px',
-                boxShadow: '0 1px 2px rgba(14,22,48,0.04), 0 24px 48px -28px rgba(14,22,48,0.22)',
+                boxShadow: (t) => t.shadows[6],
               }}
             >
               <Typography variant="h3" component="h1">
@@ -69,7 +69,7 @@ const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children })
               <Box sx={{ mt: 3 }}>{children}</Box>
             </Paper>
             {footer && (
-              <Typography variant="body2" sx={{ mt: 3, textAlign: 'center', color: 'text.secondary' }}>
+              <Typography variant="body2" sx={{ mt: 2.5, textAlign: 'center', color: 'text.secondary' }}>
                 {footer}
               </Typography>
             )}
@@ -77,7 +77,7 @@ const AuthLayout = ({ title, subtitle, documentTitle, panel, footer, children })
         </Box>
 
         <Typography variant="caption" component="p" sx={{ color: 'text.secondary', textAlign: { xs: 'center', md: 'left' } }}>
-          © {new Date().getFullYear()} Navigate — Team 13 Capstone
+          © {new Date().getFullYear()} Navigate
         </Typography>
       </Box>
 

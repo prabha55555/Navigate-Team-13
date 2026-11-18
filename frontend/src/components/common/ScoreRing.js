@@ -1,5 +1,5 @@
 import { Box } from '@mui/material';
-import { useTheme } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
 import React from 'react';
 
 /**
@@ -19,7 +19,7 @@ const ScoreRing = ({ value = 0, size = 72, thickness = 7, tone = 'primary', trac
       sx={{ position: 'relative', width: size, height: size, flex: 'none', ...sx }}
     >
       <svg viewBox="0 0 100 100" width={size} height={size} aria-hidden="true" focusable="false" style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx="50" cy="50" r={radius} fill="none" stroke={track || 'rgba(14,22,48,0.08)'} strokeWidth={thickness} />
+        <circle cx="50" cy="50" r={radius} fill="none" stroke={track || alpha(theme.palette.text.primary, 0.08)} strokeWidth={thickness} />
         <circle
           cx="50"
           cy="50"

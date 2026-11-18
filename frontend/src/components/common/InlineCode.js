@@ -17,7 +17,8 @@ const InlineCode = ({ text }) => {
           px: 0.6,
           py: 0.1,
           borderRadius: 1,
-          bgcolor: 'rgba(14, 22, 48, 0.06)',
+          bgcolor: 'action.hover',
+          color: 'text.primary',
         }}
       >
         {part.slice(1, -1)}

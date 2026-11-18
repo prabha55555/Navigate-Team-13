@@ -26,3 +26,5 @@ Thumbs.db
 *.swo
 # Production build output
 frontend/build/
+ai_services/cache/
+.builds/

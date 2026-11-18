@@ -29,6 +29,14 @@ const isBlank = (value) =>
 
 const norm = (value) => String(value).trim().toLowerCase();
 
+// true / "True" / "T" all mean the same true-false answer.
+const normTrueFalse = (value) => {
+  const v = norm(value);
+  if (v === 't') return 'true';
+  if (v === 'f') return 'false';
+  return v;
+};
+
 /**
  * Resolve an answer key that may be stored as option text, an option letter
  * ("B") or an option index (1) into option text.
@@ -68,11 +76,26 @@ function gradeTextAnswer(answerText, points) {
 }
 
 /**
- * Score a set of answers against an assessment.
- * @param {Object} assessment - assessment with questions[]
- * @param {Object} answers - map of questionId -> answer
+ * Whether a short answer matches its key exactly (ignoring case/whitespace).
+ * The key may be one accepted answer or an array of accepted answers.
  */
-function gradeSubmission(assessment, answers) {
+function matchesShortAnswerKey(answerText, correctAnswer) {
+  const accepted = (Array.isArray(correctAnswer) ? correctAnswer : [correctAnswer])
+    .filter(a => !isBlank(a) && typeof a !== 'object')
+    .map(a => norm(a).replace(/\s+/g, ' '));
+  return accepted.includes(norm(answerText).replace(/\s+/g, ' '));
+}
+
+/**
+ * Score a set of answers against an assessment.
+ * Written answers that are not an exact key match get a provisional
+ * length-based score and `needsReview: true` so an instructor can confirm it.
+ * @param {Object} assessment - assessment with questions[] (and optional passingScore)
+ * @param {Object} answers - map of questionId -> answer
+ * @param {Object} [options] - { passingScore } percent needed to pass (default PASS_THRESHOLD)
+ */
+function gradeSubmission(assessment, answers, options = {}) {
+  const passingScore = Number.isFinite(Number(options.passingScore)) ? Number(options.passingScore) : PASS_THRESHOLD;
   const questions = Array.isArray(assessment && assessment.questions) ? assessment.questions : [];
   const answerMap = answers && typeof answers === 'object' ? answers : {};
 
@@ -94,6 +117,7 @@ function gradeSubmission(assessment, answers) {
     let isCorrect = false;
     let partialCredit = 0;
     let feedback = '';
+    let needsReview = false;
 
     if (isBlank(studentAnswer)) {
       feedback = 'No answer provided.';
@@ -104,7 +128,7 @@ function gradeSubmission(assessment, answers) {
       feedback = isCorrect ? 'Correct answer!' : `Incorrect. The correct answer is: ${expected}`;
     } else if (questionType === 'true-false') {
       // The take-assessment UI sends booleans; stored keys are "True"/"False".
-      isCorrect = correctAnswer !== undefined && correctAnswer !== null && norm(studentAnswer) === norm(correctAnswer);
+      isCorrect = correctAnswer !== undefined && correctAnswer !== null && normTrueFalse(studentAnswer) === normTrueFalse(correctAnswer);
       feedback = isCorrect ? 'Correct!' : `Incorrect. The correct answer is: ${correctAnswer}`;
     } else if (questionType === 'multiple-select') {
       const given = (Array.isArray(studentAnswer) ? studentAnswer : [studentAnswer]).map(a => norm(resolveOption(a, options)));
@@ -116,7 +140,13 @@ function gradeSubmission(assessment, answers) {
       feedback = isCorrect ? 'All correct selections!' : 'Some selections were incorrect.';
     } else if (questionType === 'short-answer' || questionType === 'essay') {
       const answerText = typeof studentAnswer === 'string' ? studentAnswer.trim() : String(studentAnswer);
-      ({ isCorrect, partialCredit, feedback } = gradeTextAnswer(answerText, points));
+      if (questionType === 'short-answer' && matchesShortAnswerKey(answerText, correctAnswer)) {
+        isCorrect = true;
+        feedback = 'Correct!';
+      } else {
+        ({ isCorrect, partialCredit, feedback } = gradeTextAnswer(answerText, points));
+        needsReview = true;
+      }
     } else if (!isBlank(correctAnswer) && !Array.isArray(correctAnswer)) {
       // Unknown type with an answer key: compare directly instead of giving free points.
       isCorrect = norm(studentAnswer) === norm(correctAnswer);
@@ -124,6 +154,7 @@ function gradeSubmission(assessment, answers) {
     } else {
       const answerText = typeof studentAnswer === 'string' ? studentAnswer.trim() : JSON.stringify(studentAnswer);
       ({ isCorrect, partialCredit, feedback } = gradeTextAnswer(answerText, points));
+      needsReview = true;
     }
 
     const earnedPoints = isCorrect ? points : Math.min(partialCredit, points);
@@ -136,7 +167,8 @@ function gradeSubmission(assessment, answers) {
       maxScore: points,
       studentAnswer: studentAnswer === undefined ? null : studentAnswer,
       feedback,
-      partialCredit: earnedPoints > 0 && !isCorrect
+      partialCredit: earnedPoints > 0 && !isCorrect,
+      needsReview
     });
 
     detailedAnswers.push({
@@ -150,7 +182,7 @@ function gradeSubmission(assessment, answers) {
   const ratio = maxScore > 0 ? score / maxScore : 0;
   const percentage = Math.round(ratio * 100);
   // Decide pass/fail on the exact ratio so 49.6% does not round up to a pass.
-  const isPassed = ratio * 100 >= PASS_THRESHOLD;
+  const isPassed = ratio * 100 >= passingScore;
 
   return { score, maxScore, percentage, isPassed, questionResults, detailedAnswers };
 }
@@ -163,20 +195,34 @@ function findQuestion(questions, questionId) {
   return questions.find((q, i) => String(q.id !== undefined ? q.id : `q${i + 1}`) === String(questionId));
 }
 
-function generateOverallFeedback(percentage, questionResults) {
-  const correctCount = questionResults.filter(r => r.correct).length;
-  const totalCount = questionResults.length;
-
+/**
+ * Overall feedback sentence derived from the final points, so it can never
+ * contradict the score (partial credit counts; a manual override wins).
+ * @param {{ percentage: number, score: number, maxScore: number, provisional?: boolean }} result
+ *        `provisional` = some written answers still await instructor review
+ */
+function generateOverallFeedback({ percentage, score, maxScore, provisional = false, weakestTopic = null }) {
+  const fmt = (n) => String(Math.round((Number(n) || 0) * 10) / 10);
+  const pct = fmt(percentage);
+  const summary = `You scored ${pct}% (${fmt(score)}/${fmt(maxScore)} ${Number(maxScore) === 1 ? 'point' : 'points'})`;
+  let message;
   if (percentage >= 90) {
-    return `Excellent work! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You demonstrate a strong understanding of the material. Keep up the great work and continue to challenge yourself with advanced topics.`;
+    message = `Excellent work! ${summary}. You demonstrate a strong understanding of the material. Keep challenging yourself with advanced topics.`;
   } else if (percentage >= 80) {
-    return `Great job! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You have a good grasp of most concepts. Focus on the areas where you missed points to achieve even better results.`;
+    message = `Great job! ${summary}. You have a good grasp of most concepts. Focus on the areas where you lost points to do even better.`;
   } else if (percentage >= 70) {
-    return `Good effort! You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You understand many of the key concepts, but there's room for improvement. Review the areas where you lost points and practice more.`;
+    message = `Good effort! ${summary}. You understand many of the key concepts, but there is room for improvement. Review the areas where you lost points and practice more.`;
   } else if (percentage >= 60) {
-    return `You scored ${percentage}% (${correctCount}/${totalCount} questions correct). You have a basic understanding, but need to strengthen your knowledge. Focus on studying the fundamental concepts and practice regularly.`;
+    message = `${summary}. You have a basic understanding, but need to strengthen your knowledge. Focus on the fundamental concepts and practice regularly.`;
+  } else {
+    message = `${summary}. This shows significant gaps in understanding. Review the course materials thoroughly and ask your instructor or study group for help.`;
   }
-  return `You scored ${percentage}% (${correctCount}/${totalCount} questions correct). This indicates significant gaps in understanding. I recommend reviewing the course materials thoroughly and seeking additional help from your instructor or study groups.`;
+  if (weakestTopic && weakestTopic.topic) {
+    message += ` Focus next on ${weakestTopic.topic}, your weakest topic here (${fmt(weakestTopic.percentage)}% of its points).`;
+  }
+  return provisional
+    ? `${message} This score is provisional: some written answers are still waiting for your instructor's review.`
+    : message;
 }
 
 function identifyStrengths(questionResults, questions) {
@@ -229,7 +275,7 @@ function identifyWeaknesses(questionResults, questions) {
 
     const unanswered = questionResults.filter(r => isBlank(r.studentAnswer));
     if (unanswered.length > 0) {
-      weaknesses.push(`${unanswered.length} questions were left unanswered`);
+      weaknesses.push(unanswered.length === 1 ? '1 question was left unanswered' : `${unanswered.length} questions were left unanswered`);
     }
 
     const briefAnswers = questionResults.filter(r => {
@@ -326,7 +372,12 @@ function buildFeedback(grade, questions) {
   const qs = Array.isArray(questions) ? questions : [];
   try {
     const aiFeedback = {
-      overallFeedback: generateOverallFeedback(grade.percentage, grade.questionResults),
+      overallFeedback: generateOverallFeedback({
+        percentage: grade.percentage,
+        score: grade.score,
+        maxScore: grade.maxScore,
+        provisional: grade.questionResults.some(r => r.needsReview)
+      }),
       questionFeedback: grade.questionResults.reduce((acc, result) => {
         if (result.feedback) acc[result.questionId] = result.feedback;
         return acc;
